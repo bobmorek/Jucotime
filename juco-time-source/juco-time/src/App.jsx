@@ -1,5 +1,9 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { Sun, Cloud, CloudSun, CloudRain, CloudDrizzle, CloudSnow, CloudFog, CloudLightning, Navigation } from "lucide-react";
+import harbour0913 from "./assets/harbour-0913.jpg";
+import harbour1647 from "./assets/harbour-1647.jpg";
+
+const asJpeg = (b64) => (b64 ? `data:image/jpeg;base64,${b64}` : b64);
 
 /* =====================================================================
    FALMOUTH (UK) TIDE — BOAT LAUNCH PLANNER
@@ -146,10 +150,11 @@ function durStr(ms) {
 
 // ---- reference photos: capture time -> tide height at that moment ----
 const PHOTOS = [
-  { key: "img2", src: IMG.img2, iso: "2026-04-20T13:04:00+01:00", caption: "Low water — boats almost aground, harbour wall well exposed" },
-  { key: "img1", src: IMG.img1, iso: "2026-04-21T13:41:00+01:00", caption: "Just past low water — still very shallow along the wall" },
-  { key: "img3", src: IMG.img3, iso: "2026-04-27T12:50:00+01:00", caption: "Mid tide, making — boats floating clear, plenty of water" },
-  { key: "img4", src: IMG.img4, iso: "2026-05-15T09:13:00+01:00", caption: "Mid-tide on the ebb — boats afloat, dark waterline mark clearly above the water" },
+  { key: "img2", src: asJpeg(IMG.img2), iso: "2026-04-20T13:04:00+01:00", caption: "Low water — boats almost aground, harbour wall well exposed" },
+  { key: "img1", src: asJpeg(IMG.img1), iso: "2026-04-21T13:41:00+01:00", caption: "Just past low water — still very shallow along the wall" },
+  { key: "img3", src: asJpeg(IMG.img3), iso: "2026-04-27T12:50:00+01:00", caption: "Mid tide, making — boats floating clear, plenty of water" },
+  { key: "img4", src: harbour0913, iso: "2026-05-15T09:13:00+01:00", caption: "Mid-tide on the ebb — boats afloat, dark waterline mark above the water" },
+  { key: "img5", src: harbour1647, iso: "2026-05-15T16:47:00+01:00", caption: "Near high water — boats riding high, wall well covered" },
 ].map((p) => {
   const d = new Date(p.iso);
   const r = heightAt(d);
