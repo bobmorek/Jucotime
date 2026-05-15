@@ -1,7 +1,6 @@
 [build]
-  base = "juco-time-source/juco-time"
-  command = "npm run build"
-  publish = "dist"
+  command = "cd juco-time-source/juco-time && npm install && npm run build"
+  publish = "juco-time-source/juco-time/dist"
 
 [build.environment]
   NODE_VERSION = "20"
