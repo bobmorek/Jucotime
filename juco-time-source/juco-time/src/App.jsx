@@ -2,6 +2,8 @@ import React, { useState, useEffect, useMemo } from "react";
 import { Sun, Cloud, CloudSun, CloudRain, CloudDrizzle, CloudSnow, CloudFog, CloudLightning, Navigation } from "lucide-react";
 import harbour0913 from "./assets/harbour-0913.jpg";
 import harbour1647 from "./assets/harbour-1647.jpg";
+import harbour1232 from "./assets/harbour-1232.jpg";
+import harbour1229 from "./assets/harbour-1229.jpg";
 
 const asJpeg = (b64) => (b64 ? `data:image/jpeg;base64,${b64}` : b64);
 
@@ -155,6 +157,8 @@ const PHOTOS = [
   { key: "img3", src: asJpeg(IMG.img3), iso: "2026-04-27T12:50:00+01:00", caption: "Mid tide, making — boats floating clear, plenty of water" },
   { key: "img4", src: harbour0913, iso: "2026-05-15T09:13:00+01:00", caption: "Mid-tide on the ebb — boats afloat, dark waterline mark above the water" },
   { key: "img5", src: harbour1647, iso: "2026-05-15T16:47:00+01:00", caption: "Near high water — boats riding high, wall well covered" },
+  { key: "img6", src: harbour1232, iso: "2026-05-18T12:32:00+01:00", caption: "Low water — boats settled on the weed, harbour wall fully exposed" },
+  { key: "img7", src: harbour1229, iso: "2026-05-20T12:29:00+01:00", caption: "High water — boats riding high, wall well covered, calm clear day" },
 ].map((p) => {
   const d = new Date(p.iso);
   const r = heightAt(d);
