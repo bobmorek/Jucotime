@@ -4,6 +4,9 @@ import harbour0913 from "./assets/harbour-0913.jpg";
 import harbour1647 from "./assets/harbour-1647.jpg";
 import harbour1232 from "./assets/harbour-1232.jpg";
 import harbour1229 from "./assets/harbour-1229.jpg";
+import harbour1302 from "./assets/harbour-1302.jpg";
+import harbour1303 from "./assets/harbour-1303.jpg";
+import harbour1322 from "./assets/harbour-1322.jpg";
 
 const asJpeg = (b64) => (b64 ? `data:image/jpeg;base64,${b64}` : b64);
 
@@ -159,6 +162,9 @@ const PHOTOS = [
   { key: "img5", src: harbour1647, iso: "2026-05-15T16:47:00+01:00", caption: "Near high water — boats riding high, wall well covered" },
   { key: "img6", src: harbour1232, iso: "2026-05-18T12:32:00+01:00", caption: "Low water — boats settled on the weed, harbour wall fully exposed" },
   { key: "img7", src: harbour1229, iso: "2026-05-20T12:29:00+01:00", caption: "High water — boats riding high, wall well covered, calm clear day" },
+  { key: "img8", src: harbour1302, iso: "2026-06-09T13:02:00+01:00", caption: "Just past the high — boats afloat, weed line on the wall above clear water, bright sun" },
+  { key: "img9", src: harbour1303, iso: "2026-06-09T13:03:00+01:00", caption: "Near high water — basin full, boats riding high on the moorings" },
+  { key: "img10", src: harbour1322, iso: "2026-06-02T13:22:00+01:00", caption: "Low water — boats settled on the weed, harbour wall fully exposed, overcast" },
 ].map((p) => {
   const d = new Date(p.iso);
   const r = heightAt(d);
