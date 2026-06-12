@@ -4,6 +4,9 @@ import harbour0913 from "./assets/harbour-0913.jpg";
 import harbour1647 from "./assets/harbour-1647.jpg";
 import harbour1232 from "./assets/harbour-1232.jpg";
 import harbour1229 from "./assets/harbour-1229.jpg";
+import harbour1302 from "./assets/harbour-1302.jpg";
+import harbour1303 from "./assets/harbour-1303.jpg";
+import harbour1322 from "./assets/harbour-1322.jpg";
 
 const asJpeg = (b64) => (b64 ? `data:image/jpeg;base64,${b64}` : b64);
 
@@ -95,14 +98,111 @@ const RAW = {
   "2026-06-30": [["L","00:39",1.14],["H","06:17",4.56],["L","12:46",1.18],["H","18:32",5.01]],
 };
 
-const EXTREMES = Object.entries(RAW)
+const PUBLISHED = Object.entries(RAW)
   .flatMap(([d, evs]) => evs.map(([type, hm, h]) => ({
     type, h, date: new Date(`${d}T${hm}:00+01:00`),
   })))
   .sort((a, b) => a.date - b.date);
 
+const PUBLISHED_LAST = PUBLISHED[PUBLISHED.length - 1].date.getTime();
+
+/* ---------------------------------------------------------------------
+   HARMONIC CONTINUATION
+   The published table above ends on 30 Jun 2026. To keep the planner
+   working beyond that, we fit a harmonic tidal model to those readings
+   (least squares over the 15 main constituents) and synthesise HW / LW
+   forward from where the data ends. Fit quality vs the published
+   extremes: height RMS 4.4 cm, time RMS 10.5 min.
+   --------------------------------------------------------------------- */
+const TIDE_EPOCH = Date.UTC(2026, 0, 1);  // 2026-01-01T00:00Z — phase reference
+const TIDE_Z0 = 2.97774;                  // mean level (m above Chart Datum)
+// [ angular speed °/h , cosine coeff , sine coeff ]
+const TIDE_TERMS = [
+  [28.9841042, +0.42119, +1.51723],  // M2
+  [30.0000000, -0.57910, -0.07974],  // S2
+  [28.4397295, +0.15340, +0.40261],  // N2
+  [30.0821373, +0.16786, -0.07328],  // K2
+  [15.0410686, -0.03019, +0.07124],  // K1
+  [13.9430356, +0.06686, -0.07263],  // O1
+  [14.9589314, -0.01050, +0.02555],  // P1
+  [13.3986609, -0.00665, -0.01826],  // Q1
+  [29.5284789, -0.05777, -0.23235],  // L2
+  [28.5125831, +0.05139, -0.00920],  // NU2
+  [27.8953548, +0.00301, +0.06764],  // 2N2
+  [57.9682084, +0.09684, +0.03389],  // M4
+  [58.9841042, -0.07418, +0.05082],  // MS4
+  [57.4238337, +0.07977, -0.04839],  // MN4
+  [86.9523127, -0.02022, -0.09557],  // M6
+];
+const DEG = Math.PI / 180;
+
+function harmHeight(ms) {
+  const th = (ms - TIDE_EPOCH) / 3600000;  // hours since epoch (UTC)
+  let h = TIDE_Z0;
+  for (let i = 0; i < TIDE_TERMS.length; i++) {
+    const a = TIDE_TERMS[i][0] * DEG * th;
+    h += TIDE_TERMS[i][1] * Math.cos(a) + TIDE_TERMS[i][2] * Math.sin(a);
+  }
+  return h;
+}
+function harmSlope(ms) {
+  const th = (ms - TIDE_EPOCH) / 3600000;
+  let s = 0;
+  for (let i = 0; i < TIDE_TERMS.length; i++) {
+    const w = TIDE_TERMS[i][0] * DEG;
+    const a = w * th;
+    s += -TIDE_TERMS[i][1] * w * Math.sin(a) + TIDE_TERMS[i][2] * w * Math.cos(a);
+  }
+  return s;
+}
+// Find HW / LW between two instants by scanning for turning points of the
+// harmonic curve (sign changes of the slope), then refining by bisection.
+function harmExtremes(startMs, endMs) {
+  const out = [];
+  const step = 6 * 60000;  // 6-minute scan — fine enough for semidiurnal extremes
+  let prevS = harmSlope(startMs), prevT = startMs;
+  for (let t = startMs + step; t <= endMs; t += step) {
+    const s = harmSlope(t);
+    if ((prevS > 0 && s <= 0) || (prevS < 0 && s >= 0)) {
+      let lo = prevT, hi = t, sLo = prevS;
+      for (let k = 0; k < 40; k++) {
+        const mid = (lo + hi) / 2, sMid = harmSlope(mid);
+        if ((sLo > 0) === (sMid > 0)) { lo = mid; sLo = sMid; } else { hi = mid; }
+      }
+      const tv = Math.round((lo + hi) / 2 / 60000) * 60000;  // nearest minute
+      out.push({
+        type: prevS > 0 ? "H" : "L",          // slope +→− is a high
+        h: Math.round(harmHeight(tv) * 100) / 100,
+        date: new Date(tv),
+        pred: true,
+      });
+    }
+    prevT = t; prevS = s;
+  }
+  return out;
+}
+
+// Keep ~13 months of forecast ahead of "now"; predictions begin right after
+// the published table ends so the two never overlap.
+const FORECAST_HORIZON_MS = 400 * 86400000;
+const genEnd = Date.now() + FORECAST_HORIZON_MS;
+const PREDICTED = genEnd > PUBLISHED_LAST
+  ? harmExtremes(PUBLISHED_LAST + 60000, genEnd)
+  : [];
+
+const EXTREMES = [...PUBLISHED, ...PREDICTED].sort((a, b) => a.date - b.date);
+
 const FIRST = EXTREMES[0].date.getTime();
 const LAST = EXTREMES[EXTREMES.length - 1].date.getTime();
+
+// Is the given day (yyyy-mm-dd, Falmouth local) within our coverage?
+const dayInRange = (iso) => {
+  const noon = new Date(`${iso}T12:00:00+01:00`).getTime();
+  return noon >= FIRST && noon <= LAST;
+};
+// True once we are past the published table and into the harmonic forecast.
+const dayIsForecast = (iso) =>
+  new Date(`${iso}T12:00:00+01:00`).getTime() > PUBLISHED_LAST;
 
 // Cosine interpolation between consecutive HW / LW — the standard tidal-curve approximation.
 function heightAt(t) {
@@ -159,6 +259,9 @@ const PHOTOS = [
   { key: "img5", src: harbour1647, iso: "2026-05-15T16:47:00+01:00", caption: "Near high water — boats riding high, wall well covered" },
   { key: "img6", src: harbour1232, iso: "2026-05-18T12:32:00+01:00", caption: "Low water — boats settled on the weed, harbour wall fully exposed" },
   { key: "img7", src: harbour1229, iso: "2026-05-20T12:29:00+01:00", caption: "High water — boats riding high, wall well covered, calm clear day" },
+  { key: "img8", src: harbour1302, iso: "2026-06-09T13:02:00+01:00", caption: "Just past the high — boats afloat, weed line on the wall above clear water, bright sun" },
+  { key: "img9", src: harbour1303, iso: "2026-06-09T13:03:00+01:00", caption: "Near high water — basin full, boats riding high on the moorings" },
+  { key: "img10", src: harbour1322, iso: "2026-06-02T13:22:00+01:00", caption: "Low water — boats settled on the weed, harbour wall fully exposed, overcast" },
 ].map((p) => {
   const d = new Date(p.iso);
   const r = heightAt(d);
@@ -196,7 +299,7 @@ export default function App() {
   const [now, setNow] = useState(() => new Date());
   const [selISO, setSelISO] = useState(() => {
     const t = todayISO();
-    return RAW[t] ? t : "2026-05-14";
+    return dayInRange(t) ? t : "2026-05-14";
   });
   const [threshold, setThreshold] = useState(1.3);
   const [activeSlip, setActiveSlip] = useState("Grove Place slip");
@@ -605,8 +708,8 @@ export default function App() {
               )}
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <button onClick={() => setSelISO(shiftISO(selISO, -1))} disabled={!RAW[shiftISO(selISO, -1)]}
-                style={navBtn(RAW[shiftISO(selISO, -1)])}>‹</button>
+              <button onClick={() => setSelISO(shiftISO(selISO, -1))} disabled={!dayInRange(shiftISO(selISO, -1))}
+                style={navBtn(dayInRange(shiftISO(selISO, -1)))}>‹</button>
               <span style={{
                 fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 18, minWidth: 132, textAlign: "center",
               }}>
@@ -614,9 +717,12 @@ export default function App() {
                 {selISO === todayISO() && (
                   <span style={{ color: C.red, fontSize: 12, fontFamily: "Archivo", marginLeft: 6 }}>TODAY</span>
                 )}
+                {dayIsForecast(selISO) && (
+                  <span style={{ color: C.sea, fontSize: 12, fontFamily: "Archivo", marginLeft: 6 }}>FORECAST</span>
+                )}
               </span>
-              <button onClick={() => setSelISO(shiftISO(selISO, 1))} disabled={!RAW[shiftISO(selISO, 1)]}
-                style={navBtn(RAW[shiftISO(selISO, 1)])}>›</button>
+              <button onClick={() => setSelISO(shiftISO(selISO, 1))} disabled={!dayInRange(shiftISO(selISO, 1))}
+                style={navBtn(dayInRange(shiftISO(selISO, 1)))}>›</button>
             </div>
           </div>
 
@@ -995,7 +1101,7 @@ export default function App() {
           textAlign: "center", fontSize: 11, color: C.inkSoft, marginTop: 20,
           fontFamily: "'Spline Sans Mono', monospace",
         }}>
-          JUCO TIME · FALMOUTH HARBOUR · DATA 19 APR – 30 JUN 2026
+          JUCO TIME · FALMOUTH HARBOUR · PUBLISHED 19 APR – 30 JUN 2026 · HARMONIC FORECAST BEYOND
         </p>
       </div>
     </div>
