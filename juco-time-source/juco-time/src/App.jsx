@@ -5,6 +5,10 @@ import harbour1647 from "./assets/harbour-1647.jpg";
 import harbour1232 from "./assets/harbour-1232.jpg";
 import harbour1229 from "./assets/harbour-1229.jpg";
 import harbour1322 from "./assets/harbour-1322.jpg";
+import harbour1302 from "./assets/harbour-1302.jpg";
+import harbour1836 from "./assets/harbour-1836.jpg";
+import harbour1633 from "./assets/harbour-1633.jpg";
+import harbour1721 from "./assets/harbour-1721.jpg";
 
 const asJpeg = (b64) => (b64 ? `data:image/jpeg;base64,${b64}` : b64);
 
@@ -161,6 +165,10 @@ const PHOTOS = [
   { key: "img6", src: harbour1232, iso: "2026-05-18T12:32:00+01:00", caption: "Low water — boats settled on the weed, harbour wall fully exposed" },
   { key: "img7", src: harbour1229, iso: "2026-05-20T12:29:00+01:00", caption: "High water — boats riding high, wall well covered, calm clear day" },
   { key: "img8", src: harbour1322, iso: "2026-06-02T13:22:27+01:00", caption: "Low water — boats in the shallows, weed-covered bed and wall exposed" },
+  { key: "img9", src: harbour1302, iso: "2026-06-09T13:02:00+01:00", caption: "Bright day, mid-upper tide — boats afloat in clear water" },
+  { key: "img10", src: harbour1836, iso: "2026-06-13T18:36:13+01:00", caption: "Golden-hour high tide — busy quay, calm reflective water" },
+  { key: "img11", src: harbour1633, iso: "2026-06-18T16:33:00+01:00", caption: "Overcast mid tide — boats afloat, weed line on the wall" },
+  { key: "img12", src: harbour1721, iso: "2026-06-20T17:21:00+01:00", caption: "Sunny low water — boats settled on the weed, crowds on the quay" },
 ].map((p) => {
   const d = new Date(p.iso);
   const r = heightAt(d);
