@@ -1057,6 +1057,7 @@ export default function App() {
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap", fontSize: 11, color: C.inkSoft, marginTop: 12, paddingTop: 10, borderTop: `1px solid ${C.lineSoft}` }}>
             <LegendItem color={C.seaDeep} label="mean wind" />
             <LegendItem color={C.inkSoft} label="gusts" dashed />
+            <span>↑ arrows point where the wind blows to</span>
             <span style={{ marginLeft: "auto" }}>Queens live · Open-Meteo history</span>
           </div>
         </section>
@@ -1245,6 +1246,20 @@ function WindArrow({ dir, color = C.seaDeep, size = 18 }) {
     }}>
       <Navigation size={size} strokeWidth={2} color={color} fill={color} />
     </span>
+  );
+}
+
+// SVG wind-direction arrow for use inside <svg> charts. Points where the wind
+// is going (downwind), matching WindArrow: 0° = from north = arrow points down.
+function SvgWindArrow({ x, y, dir, color = C.seaDeep, size = 5 }) {
+  if (dir == null) return null;
+  const s = size;
+  return (
+    <g transform={`translate(${x} ${y}) rotate(${((dir + 180) % 360)})`}>
+      <line x1={0} y1={s} x2={0} y2={-s} stroke={color} strokeWidth={1.6} strokeLinecap="round" />
+      <path d={`M0,${-s - 1} L${-s * 0.6},${-s + 2} M0,${-s - 1} L${s * 0.6},${-s + 2}`}
+        stroke={color} strokeWidth={1.6} fill="none" strokeLinecap="round" strokeLinejoin="round" />
+    </g>
   );
 }
 
@@ -1516,6 +1531,12 @@ function WindChart({ pts, now, live }) {
   const ticks = [0, 6, 12, 18, 24].map((hr) => fromMs + hr * 3600000);
   const liveDeg = live ? compassToDeg(live.windDir) : null;
 
+  // direction arrows along the top, sampled every ~3 h
+  const arrowRowY = PT + 7;
+  const arrowPts = inWin
+    .filter((p) => p.dir != null && p.t.getTime() >= fromMs)
+    .filter((_, i) => i % 3 === 0);
+
   return (
     <div style={{ marginTop: 12 }}>
       {liveKn != null && (
@@ -1568,6 +1589,14 @@ function WindChart({ pts, now, live }) {
           {areaPath && <path d={areaPath} fill={C.seaFill} />}
           {meanPath && <path d={meanPath} fill="none" stroke={C.seaDeep} strokeWidth={2.2}
             strokeLinecap="round" strokeLinejoin="round" />}
+          {/* wind-direction arrows along the top */}
+          {arrowPts.map((p, i) => (
+            <SvgWindArrow key={"a" + i} x={xOf(p.t.getTime())} y={arrowRowY}
+              dir={p.dir} color={windColor(p.speed)} size={5} />
+          ))}
+          {liveDeg != null && (
+            <SvgWindArrow x={xOf(toMs)} y={arrowRowY} dir={liveDeg} color={C.red} size={5.5} />
+          )}
           {/* live Queens point at now */}
           {liveKn != null && (
             <g>
