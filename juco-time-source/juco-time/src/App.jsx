@@ -202,6 +202,8 @@ export default function App() {
   const [activeSlip, setActiveSlip] = useState("Grove Place slip");
 
   const [weather, setWeather] = useState(null);
+  const [windHist, setWindHist] = useState(null);
+  const [portlog, setPortlog] = useState(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [gaugeStation, setGaugeStation] = useState("Newlyn");
   const [gauge, setGauge] = useState(null);
@@ -241,6 +243,60 @@ export default function App() {
     }
     load();
     const id = setInterval(load, 15 * 60 * 1000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [refreshKey]);
+
+  // ---- wind speed history (Open-Meteo, previous 24 h hourly, CORS-friendly) ----
+  useEffect(() => {
+    let cancelled = false;
+    setWindHist(null);
+    async function load() {
+      try {
+        const r = await fetch(
+          "https://api.open-meteo.com/v1/forecast?latitude=50.154&longitude=-5.071" +
+          "&hourly=wind_speed_10m,wind_gusts_10m,wind_direction_10m" +
+          "&wind_speed_unit=kn&timezone=Europe%2FLondon&past_days=1&forecast_days=1"
+        );
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const j = await r.json();
+        if (cancelled) return;
+        const h = j.hourly || {};
+        const pts = (h.time || []).map((t, i) => ({
+          t: new Date(t),
+          speed: h.wind_speed_10m ? h.wind_speed_10m[i] : null,
+          gust: h.wind_gusts_10m ? h.wind_gusts_10m[i] : null,
+          dir: h.wind_direction_10m ? h.wind_direction_10m[i] : null,
+        })).filter((p) => !isNaN(p.t.getTime()) && p.speed != null);
+        setWindHist({ pts });
+      } catch (e) {
+        if (!cancelled) setWindHist({ error: String(e.message || e) });
+      }
+    }
+    load();
+    const id = setInterval(load, 15 * 60 * 1000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [refreshKey]);
+
+  // ---- live local wind + tide (Falmouth port-log, scraped via Netlify fn) ----
+  // Queens Met wind + Docks Tide from apfalmouth.port-log.net. The source has no
+  // CORS headers, so we read it through our own /api/portlog serverless function.
+  useEffect(() => {
+    let cancelled = false;
+    setPortlog(null);
+    async function load() {
+      try {
+        const r = await fetch("/api/portlog");
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const j = await r.json();
+        if (cancelled) return;
+        if (j.error) throw new Error(j.error);
+        setPortlog(j);
+      } catch (e) {
+        if (!cancelled) setPortlog({ error: String(e.message || e) });
+      }
+    }
+    load();
+    const id = setInterval(load, 5 * 60 * 1000);
     return () => { cancelled = true; clearInterval(id); };
   }, [refreshKey]);
 
@@ -383,6 +439,12 @@ export default function App() {
   const isToday = selISO === todayISO();
   const nowM = isToday ? (now.getTime() - day.start) / 60000 : null;
   const showNowMark = nowM !== null && nowM >= 0 && nowM <= 1440;
+
+  // live AP (Falmouth Docks) observed tide height, plotted on the day chart at "now"
+  const apObserved =
+    portlog && portlog.docks && typeof portlog.docks.observed === "number"
+      ? portlog.docks.observed
+      : null;
 
   // current launch status (live)
   const liveLaunch = inRange ? live.h >= threshold : null;
@@ -627,6 +689,7 @@ export default function App() {
           }}>
             <LegendItem color={C.seaDeep} label="Falmouth prediction" />
             {gaugeLinePath && <LegendItem color="#c47150" label={`${gaugeStation} observed`} dashed />}
+            {showNowMark && apObserved != null && <LegendItem color="#6d4ca8" label="AP observed (now)" />}
             <LegendItem color={C.go} label="launch limit" />
             <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
               <span style={{
@@ -709,6 +772,20 @@ export default function App() {
                   )}
                   <text x={xOf(nowM)} y={PT - 4} textAnchor="middle"
                     fontSize={10} fontWeight={700} fill={C.red} fontFamily="Archivo">NOW</text>
+                </g>
+              )}
+              {/* live AP (Falmouth Docks) observed height at now */}
+              {showNowMark && apObserved != null && (
+                <g>
+                  <rect
+                    x={xOf(nowM) - 4.5} y={yOf(apObserved) - 4.5}
+                    width={9} height={9} fill="#6d4ca8" stroke="#fff" strokeWidth={1.6}
+                    transform={`rotate(45 ${xOf(nowM)} ${yOf(apObserved)})`}
+                  />
+                  <text x={xOf(nowM) + 8} y={yOf(apObserved) + 3} textAnchor="start"
+                    fontSize={10.5} fontWeight={700} fill="#6d4ca8" fontFamily="Archivo">
+                    AP {apObserved.toFixed(2)} m
+                  </text>
                 </g>
               )}
             </svg>
@@ -913,6 +990,78 @@ export default function App() {
           </div>
         </section>
 
+        {/* ---------- LIVE LOCAL (Falmouth port-log: Queens wind + Docks tide) ---------- */}
+        <section style={{ ...card, marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+            <span style={label}>Live local · Falmouth Docks</span>
+            <a
+              href="https://apfalmouth.port-log.net/live/Display.php"
+              target="_blank" rel="noopener noreferrer"
+              style={{
+                fontSize: 11, color: C.seaDeep, fontWeight: 700,
+                letterSpacing: "0.05em", textDecoration: "none",
+                fontFamily: "'Spline Sans Mono', monospace",
+              }}>
+              PORT-LOG ↗
+            </a>
+          </div>
+          {portlog === null ? (
+            <p style={{ fontSize: 13, color: C.inkSoft, margin: "12px 0 0" }}>
+              Loading live local readings…
+            </p>
+          ) : portlog.error ? (
+            <p style={{ fontSize: 13, color: C.danger, margin: "12px 0 0" }}>
+              Live local data unavailable right now ({portlog.error}). Tap refresh to retry.
+            </p>
+          ) : (
+            <LocalLive data={portlog} now={now} />
+          )}
+        </section>
+
+        {/* ---------- WIND SPEED · LAST 24 HOURS ---------- */}
+        <section style={{ ...card, marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 6 }}>
+            <span style={label}>Wind speed · last 24 hours</span>
+            <button onClick={() => setRefreshKey((k) => k + 1)}
+              disabled={windHist === null}
+              style={{
+                cursor: windHist === null ? "wait" : "pointer",
+                fontFamily: "'Spline Sans Mono', monospace", fontSize: 11,
+                fontWeight: 600, letterSpacing: "0.05em",
+                padding: "5px 10px", borderRadius: 7,
+                border: `1px solid ${C.line}`, background: C.panel2,
+                color: windHist === null ? C.inkSoft : C.seaDeep,
+              }}>
+              ↻ REFRESH
+            </button>
+          </div>
+          {windHist === null ? (
+            <p style={{ fontSize: 13, color: C.inkSoft, margin: "12px 0 0" }}>
+              Loading wind history…
+            </p>
+          ) : windHist.error ? (
+            <p style={{ fontSize: 13, color: C.danger, margin: "12px 0 0" }}>
+              Wind history unavailable right now ({windHist.error}). Tap refresh to retry.
+            </p>
+          ) : (
+            <WindChart
+              pts={windHist.pts}
+              now={now}
+              live={
+                portlog && portlog.queens && typeof portlog.queens.windSpeed === "number"
+                  ? portlog.queens
+                  : null
+              }
+            />
+          )}
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", fontSize: 11, color: C.inkSoft, marginTop: 12, paddingTop: 10, borderTop: `1px solid ${C.lineSoft}` }}>
+            <LegendItem color={C.seaDeep} label="mean wind" />
+            <LegendItem color={C.inkSoft} label="gusts" dashed />
+            <span>↑ arrows point where the wind blows to</span>
+            <span style={{ marginLeft: "auto" }}>Queens live · Open-Meteo history</span>
+          </div>
+        </section>
+
         {/* ---------- LIVE TIDE GAUGE (Environment Agency / BODC) ---------- */}
         <section style={{ ...card, marginBottom: 16 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
@@ -1060,6 +1209,16 @@ function compass8(deg) {
 function windColor(kn) {
   return kn < 11 ? C.go : kn < 17 ? C.wait : C.danger;
 }
+// Compass text (e.g. "WSW") -> degrees the wind comes FROM, for WindArrow.
+const COMPASS_DEG = {
+  N: 0, NNE: 22.5, NE: 45, ENE: 67.5, E: 90, ESE: 112.5, SE: 135, SSE: 157.5,
+  S: 180, SSW: 202.5, SW: 225, WSW: 247.5, W: 270, WNW: 292.5, NW: 315, NNW: 337.5,
+};
+function compassToDeg(txt) {
+  if (txt == null) return null;
+  const d = COMPASS_DEG[String(txt).trim().toUpperCase()];
+  return d == null ? null : d;
+}
 
 function WIcon({ code, size = 30 }) {
   const stroke = 1.7;
@@ -1087,6 +1246,20 @@ function WindArrow({ dir, color = C.seaDeep, size = 18 }) {
     }}>
       <Navigation size={size} strokeWidth={2} color={color} fill={color} />
     </span>
+  );
+}
+
+// SVG wind-direction arrow for use inside <svg> charts. Points where the wind
+// is going (downwind), matching WindArrow: 0° = from north = arrow points down.
+function SvgWindArrow({ x, y, dir, color = C.seaDeep, size = 5 }) {
+  if (dir == null) return null;
+  const s = size;
+  return (
+    <g transform={`translate(${x} ${y}) rotate(${((dir + 180) % 360)})`}>
+      <line x1={0} y1={s} x2={0} y2={-s} stroke={color} strokeWidth={1.6} strokeLinecap="round" />
+      <path d={`M0,${-s - 1} L${-s * 0.6},${-s + 2} M0,${-s - 1} L${s * 0.6},${-s + 2}`}
+        stroke={color} strokeWidth={1.6} fill="none" strokeLinecap="round" strokeLinejoin="round" />
+    </g>
   );
 }
 
@@ -1192,6 +1365,246 @@ function WCell({ cell }) {
       </div>
       <div style={{ fontSize: 10, color: C.inkSoft, letterSpacing: "0.07em", fontWeight: 600 }}>
         {compass8(cell.windDir)}
+      </div>
+    </div>
+  );
+}
+
+// Parse the port-log "YYYY-MM-DD HH:MM:SS UTC" timestamps into a Date.
+function parsePortlogTime(s) {
+  if (!s) return null;
+  const d = new Date(String(s).trim().replace(" ", "T").replace(/\s*UTC$/, "Z"));
+  return isNaN(d.getTime()) ? null : d;
+}
+
+// Live local readings scraped from Falmouth port-log: Queens wind + Docks tide.
+function LocalLive({ data, now }) {
+  const { queens, docks } = data;
+  const nowMs = now ? now.getTime() : Date.now();
+  const stat = {
+    flex: "1 1 240px", minWidth: 220,
+    background: C.panel2, border: `1px solid ${C.lineSoft}`,
+    borderRadius: 10, padding: "12px 14px",
+  };
+  const ago = (s) => {
+    const d = parsePortlogTime(s);
+    return d ? `${durStr(nowMs - d.getTime())} ago` : null;
+  };
+
+  const windKn = queens && typeof queens.windSpeed === "number" ? queens.windSpeed : null;
+  const wc = windKn != null ? windColor(windKn) : C.inkSoft;
+  const windDeg = queens ? compassToDeg(queens.windDir) : null;
+  const surge = docks && typeof docks.surge === "number" ? docks.surge : null;
+
+  return (
+    <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 12 }}>
+      {/* Queens wind */}
+      <div style={stat}>
+        <div style={{ ...label, marginBottom: 8 }}>Queens — wind</div>
+        {queens && windKn != null ? (
+          <>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              {windDeg != null && <WindArrow dir={windDeg} color={wc} size={24} />}
+              <div style={{
+                fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 44,
+                lineHeight: 0.95, color: wc,
+              }}>
+                {Math.round(windKn)}
+                <span style={{ fontSize: 15, color: C.inkSoft, fontWeight: 500 }}> kn</span>
+              </div>
+              <div style={{ fontSize: 13, color: C.inkSoft, fontWeight: 600 }}>
+                from {queens.windDir}
+              </div>
+            </div>
+            <div style={{ fontSize: 12, color: C.inkSoft, marginTop: 6 }}>
+              {typeof queens.gustSpeed === "number"
+                ? <>gusting <strong style={{ color: windColor(queens.gustSpeed) }}>{Math.round(queens.gustSpeed)} kn</strong>
+                    {queens.gustDir ? ` ${queens.gustDir}` : ""}</>
+                : "gust n/a"}
+            </div>
+            {ago(queens.dateTime) && (
+              <div style={{ fontSize: 11, color: C.inkSoft, marginTop: 4 }}>
+                measured {ago(queens.dateTime)}
+              </div>
+            )}
+          </>
+        ) : (
+          <div style={{ fontSize: 13, color: C.inkSoft }}>no wind reading</div>
+        )}
+      </div>
+
+      {/* Docks tide */}
+      <div style={stat}>
+        <div style={{ ...label, marginBottom: 8 }}>Docks — tide</div>
+        {docks && typeof docks.observed === "number" ? (
+          <>
+            <div style={{
+              fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 44,
+              lineHeight: 0.95, color: C.seaDeep,
+            }}>
+              {docks.observed.toFixed(2)}
+              <span style={{ fontSize: 15, color: C.inkSoft, fontWeight: 500 }}> m</span>
+            </div>
+            <div style={{ fontSize: 12, color: C.inkSoft, marginTop: 6 }}>
+              observed · predicted{" "}
+              <strong style={{ color: C.ink }}>
+                {typeof docks.predicted === "number" ? docks.predicted.toFixed(2) : "—"} m
+              </strong>
+            </div>
+            {surge != null && (
+              <div style={{ fontSize: 12, marginTop: 4 }}>
+                surge{" "}
+                <strong style={{ color: surge >= 0 ? C.sea : C.wait }}>
+                  {surge >= 0 ? "+" : ""}{surge.toFixed(2)} m
+                </strong>
+                <span style={{ color: C.inkSoft }}> {surge >= 0 ? "above" : "below"} prediction</span>
+              </div>
+            )}
+            {ago(docks.dateTime) && (
+              <div style={{ fontSize: 11, color: C.inkSoft, marginTop: 4 }}>
+                measured {ago(docks.dateTime)}
+              </div>
+            )}
+          </>
+        ) : (
+          <div style={{ fontSize: 13, color: C.inkSoft }}>no tide reading</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Wind speed over the previous 24 hours (Open-Meteo hourly), with the live
+// Queens reading from port-log marked at "now".
+function WindChart({ pts, now, live }) {
+  const W = 760, H = 220, PL = 30, PR = 14, PT = 14, PB = 26;
+  const plotW = W - PL - PR, plotH = H - PT - PB;
+  const windowMs = 24 * 3600 * 1000;
+  const toMs = now ? now.getTime() : Date.now();
+  const fromMs = toMs - windowMs;
+
+  // hourly points inside the 24 h window
+  const inWin = (pts || []).filter(
+    (p) => p.t.getTime() >= fromMs - 3600000 && p.t.getTime() <= toMs
+  );
+  const liveKn = live && typeof live.windSpeed === "number" ? live.windSpeed : null;
+
+  if (inWin.length < 2 && liveKn == null) {
+    return (
+      <p style={{ fontSize: 13, color: C.inkSoft, margin: "12px 0 0" }}>
+        Not enough wind history to plot yet.
+      </p>
+    );
+  }
+
+  // y-scale: cover speeds + gusts (and live), at least 20 kn, rounded up to 5
+  const all = [];
+  inWin.forEach((p) => { if (p.speed != null) all.push(p.speed); if (p.gust != null) all.push(p.gust); });
+  if (liveKn != null) all.push(liveKn);
+  if (live && typeof live.gustSpeed === "number") all.push(live.gustSpeed);
+  const yMax = Math.max(20, Math.ceil((all.length ? Math.max(...all) : 20) / 5) * 5);
+
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const xOf = (ms) => PL + (clamp(ms, fromMs, toMs) - fromMs) / windowMs * plotW;
+  const yOf = (v) => PT + plotH - (clamp(v, 0, yMax) / yMax) * plotH;
+
+  // mean-wind vertices (append live point at "now" so the line reaches the present)
+  const meanVerts = inWin.filter((p) => p.speed != null).map((p) => ({ ms: p.t.getTime(), v: p.speed }));
+  if (liveKn != null) meanVerts.push({ ms: toMs, v: liveKn });
+  const meanPath = meanVerts.map((d, i) => `${i === 0 ? "M" : "L"}${xOf(d.ms).toFixed(1)},${yOf(d.v).toFixed(1)}`).join(" ");
+  const areaPath = meanVerts.length
+    ? `${meanPath} L${xOf(meanVerts[meanVerts.length - 1].ms).toFixed(1)},${yOf(0)} L${xOf(meanVerts[0].ms).toFixed(1)},${yOf(0)} Z`
+    : "";
+
+  const gustVerts = inWin.filter((p) => p.gust != null).map((p) => ({ ms: p.t.getTime(), v: p.gust }));
+  const gustPath = gustVerts.map((d, i) => `${i === 0 ? "M" : "L"}${xOf(d.ms).toFixed(1)},${yOf(d.v).toFixed(1)}`).join(" ");
+
+  // calm / caution / rough background bands (match the forecast colour bands)
+  const band = (lo, hi, fill) => {
+    if (hi <= 0 || lo >= yMax) return null;
+    const y = yOf(Math.min(hi, yMax));
+    const h = yOf(Math.max(lo, 0)) - y;
+    return <rect x={PL} y={y} width={plotW} height={h} fill={fill} />;
+  };
+
+  // x-axis ticks every 6 h
+  const ticks = [0, 6, 12, 18, 24].map((hr) => fromMs + hr * 3600000);
+  const liveDeg = live ? compassToDeg(live.windDir) : null;
+
+  // direction arrows along the top, sampled every ~3 h
+  const arrowRowY = PT + 7;
+  const arrowPts = inWin
+    .filter((p) => p.dir != null && p.t.getTime() >= fromMs)
+    .filter((_, i) => i % 3 === 0);
+
+  return (
+    <div style={{ marginTop: 12 }}>
+      {liveKn != null && (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+          {liveDeg != null && <WindArrow dir={liveDeg} color={windColor(liveKn)} size={22} />}
+          <span style={{
+            fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 34,
+            lineHeight: 1, color: windColor(liveKn),
+          }}>
+            {Math.round(liveKn)}<span style={{ fontSize: 13, color: C.inkSoft, fontWeight: 500 }}> kn now</span>
+          </span>
+          <span style={{ fontSize: 12, color: C.inkSoft }}>
+            Queens · from {live.windDir}
+            {typeof live.gustSpeed === "number" ? ` · gust ${Math.round(live.gustSpeed)} kn` : ""}
+          </span>
+        </div>
+      )}
+      <div style={{ width: "100%", overflowX: "auto" }}>
+        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", minWidth: 480, display: "block" }}>
+          {band(0, 11, "rgba(47,125,82,0.10)")}
+          {band(11, 17, "rgba(176,125,34,0.10)")}
+          {band(17, yMax, "rgba(169,63,48,0.10)")}
+          {/* y grid + labels every 5 kn */}
+          {Array.from({ length: yMax / 5 + 1 }, (_, k) => {
+            const v = k * 5;
+            return (
+              <g key={"y" + v}>
+                <line x1={PL} x2={W - PR} y1={yOf(v)} y2={yOf(v)} stroke={C.lineSoft} strokeWidth={1} />
+                <text x={PL - 5} y={yOf(v) + 3} textAnchor="end" fontSize={10} fill={C.inkSoft}
+                  fontFamily="'Spline Sans Mono', monospace">{v}</text>
+              </g>
+            );
+          })}
+          {/* x ticks */}
+          {ticks.map((ms, i) => (
+            <g key={"x" + i}>
+              <line x1={xOf(ms)} x2={xOf(ms)} y1={PT} y2={PT + plotH} stroke={C.lineSoft} strokeWidth={1} />
+              <text x={xOf(ms)} y={H - 9} textAnchor="middle" fontSize={10} fill={C.inkSoft}
+                fontFamily="'Spline Sans Mono', monospace">
+                {i === ticks.length - 1 ? "now" : fmtTime(new Date(ms))}
+              </text>
+            </g>
+          ))}
+          {/* gusts */}
+          {gustPath && (
+            <path d={gustPath} fill="none" stroke={C.inkSoft} strokeWidth={1.5}
+              strokeDasharray="4 3" strokeLinecap="round" strokeLinejoin="round" opacity={0.8} />
+          )}
+          {/* mean wind */}
+          {areaPath && <path d={areaPath} fill={C.seaFill} />}
+          {meanPath && <path d={meanPath} fill="none" stroke={C.seaDeep} strokeWidth={2.2}
+            strokeLinecap="round" strokeLinejoin="round" />}
+          {/* wind-direction arrows along the top */}
+          {arrowPts.map((p, i) => (
+            <SvgWindArrow key={"a" + i} x={xOf(p.t.getTime())} y={arrowRowY}
+              dir={p.dir} color={windColor(p.speed)} size={5} />
+          ))}
+          {liveDeg != null && (
+            <SvgWindArrow x={xOf(toMs)} y={arrowRowY} dir={liveDeg} color={C.red} size={5.5} />
+          )}
+          {/* live Queens point at now */}
+          {liveKn != null && (
+            <g>
+              <line x1={xOf(toMs)} x2={xOf(toMs)} y1={PT} y2={PT + plotH} stroke={C.red} strokeWidth={1.3} />
+              <circle cx={xOf(toMs)} cy={yOf(liveKn)} r={4.5} fill={C.red} stroke="#fff" strokeWidth={1.8} />
+            </g>
+          )}
+        </svg>
       </div>
     </div>
   );
