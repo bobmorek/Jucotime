@@ -192,6 +192,13 @@ const FONTS = `
 }
 `;
 
+// Shared "small caps" section-label style. Module-level so components defined
+// outside App (e.g. LocalLive) can use it too.
+const label = {
+  fontSize: 11, letterSpacing: "0.13em", textTransform: "uppercase",
+  color: C.inkSoft, fontWeight: 600, fontFamily: "Archivo, sans-serif",
+};
+
 export default function App() {
   const [now, setNow] = useState(() => new Date());
   const [selISO, setSelISO] = useState(() => {
@@ -468,10 +475,6 @@ export default function App() {
   const card = {
     background: C.panel, border: `1px solid ${C.line}`, borderRadius: 14,
     padding: 18, boxShadow: "0 1px 0 rgba(255,255,255,0.6) inset, 0 6px 18px rgba(27,43,61,0.07)",
-  };
-  const label = {
-    fontSize: 11, letterSpacing: "0.13em", textTransform: "uppercase",
-    color: C.inkSoft, fontWeight: 600, fontFamily: "Archivo, sans-serif",
   };
 
   return (
