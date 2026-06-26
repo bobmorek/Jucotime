@@ -202,6 +202,7 @@ export default function App() {
   const [activeSlip, setActiveSlip] = useState("Grove Place slip");
 
   const [weather, setWeather] = useState(null);
+  const [portlog, setPortlog] = useState(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [gaugeStation, setGaugeStation] = useState("Newlyn");
   const [gauge, setGauge] = useState(null);
@@ -241,6 +242,29 @@ export default function App() {
     }
     load();
     const id = setInterval(load, 15 * 60 * 1000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [refreshKey]);
+
+  // ---- live local wind + tide (Falmouth port-log, scraped via Netlify fn) ----
+  // Queens Met wind + Docks Tide from apfalmouth.port-log.net. The source has no
+  // CORS headers, so we read it through our own /api/portlog serverless function.
+  useEffect(() => {
+    let cancelled = false;
+    setPortlog(null);
+    async function load() {
+      try {
+        const r = await fetch("/api/portlog");
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const j = await r.json();
+        if (cancelled) return;
+        if (j.error) throw new Error(j.error);
+        setPortlog(j);
+      } catch (e) {
+        if (!cancelled) setPortlog({ error: String(e.message || e) });
+      }
+    }
+    load();
+    const id = setInterval(load, 5 * 60 * 1000);
     return () => { cancelled = true; clearInterval(id); };
   }, [refreshKey]);
 
@@ -913,6 +937,34 @@ export default function App() {
           </div>
         </section>
 
+        {/* ---------- LIVE LOCAL (Falmouth port-log: Queens wind + Docks tide) ---------- */}
+        <section style={{ ...card, marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+            <span style={label}>Live local · Falmouth Docks</span>
+            <a
+              href="https://apfalmouth.port-log.net/live/Display.php"
+              target="_blank" rel="noopener noreferrer"
+              style={{
+                fontSize: 11, color: C.seaDeep, fontWeight: 700,
+                letterSpacing: "0.05em", textDecoration: "none",
+                fontFamily: "'Spline Sans Mono', monospace",
+              }}>
+              PORT-LOG ↗
+            </a>
+          </div>
+          {portlog === null ? (
+            <p style={{ fontSize: 13, color: C.inkSoft, margin: "12px 0 0" }}>
+              Loading live local readings…
+            </p>
+          ) : portlog.error ? (
+            <p style={{ fontSize: 13, color: C.danger, margin: "12px 0 0" }}>
+              Live local data unavailable right now ({portlog.error}). Tap refresh to retry.
+            </p>
+          ) : (
+            <LocalLive data={portlog} now={now} />
+          )}
+        </section>
+
         {/* ---------- LIVE TIDE GAUGE (Environment Agency / BODC) ---------- */}
         <section style={{ ...card, marginBottom: 16 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
@@ -1060,6 +1112,16 @@ function compass8(deg) {
 function windColor(kn) {
   return kn < 11 ? C.go : kn < 17 ? C.wait : C.danger;
 }
+// Compass text (e.g. "WSW") -> degrees the wind comes FROM, for WindArrow.
+const COMPASS_DEG = {
+  N: 0, NNE: 22.5, NE: 45, ENE: 67.5, E: 90, ESE: 112.5, SE: 135, SSE: 157.5,
+  S: 180, SSW: 202.5, SW: 225, WSW: 247.5, W: 270, WNW: 292.5, NW: 315, NNW: 337.5,
+};
+function compassToDeg(txt) {
+  if (txt == null) return null;
+  const d = COMPASS_DEG[String(txt).trim().toUpperCase()];
+  return d == null ? null : d;
+}
 
 function WIcon({ code, size = 30 }) {
   const stroke = 1.7;
@@ -1192,6 +1254,110 @@ function WCell({ cell }) {
       </div>
       <div style={{ fontSize: 10, color: C.inkSoft, letterSpacing: "0.07em", fontWeight: 600 }}>
         {compass8(cell.windDir)}
+      </div>
+    </div>
+  );
+}
+
+// Parse the port-log "YYYY-MM-DD HH:MM:SS UTC" timestamps into a Date.
+function parsePortlogTime(s) {
+  if (!s) return null;
+  const d = new Date(String(s).trim().replace(" ", "T").replace(/\s*UTC$/, "Z"));
+  return isNaN(d.getTime()) ? null : d;
+}
+
+// Live local readings scraped from Falmouth port-log: Queens wind + Docks tide.
+function LocalLive({ data, now }) {
+  const { queens, docks } = data;
+  const nowMs = now ? now.getTime() : Date.now();
+  const stat = {
+    flex: "1 1 240px", minWidth: 220,
+    background: C.panel2, border: `1px solid ${C.lineSoft}`,
+    borderRadius: 10, padding: "12px 14px",
+  };
+  const ago = (s) => {
+    const d = parsePortlogTime(s);
+    return d ? `${durStr(nowMs - d.getTime())} ago` : null;
+  };
+
+  const windKn = queens && typeof queens.windSpeed === "number" ? queens.windSpeed : null;
+  const wc = windKn != null ? windColor(windKn) : C.inkSoft;
+  const windDeg = queens ? compassToDeg(queens.windDir) : null;
+  const surge = docks && typeof docks.surge === "number" ? docks.surge : null;
+
+  return (
+    <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 12 }}>
+      {/* Queens wind */}
+      <div style={stat}>
+        <div style={{ ...label, marginBottom: 8 }}>Queens — wind</div>
+        {queens && windKn != null ? (
+          <>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              {windDeg != null && <WindArrow dir={windDeg} color={wc} size={24} />}
+              <div style={{
+                fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 44,
+                lineHeight: 0.95, color: wc,
+              }}>
+                {Math.round(windKn)}
+                <span style={{ fontSize: 15, color: C.inkSoft, fontWeight: 500 }}> kn</span>
+              </div>
+              <div style={{ fontSize: 13, color: C.inkSoft, fontWeight: 600 }}>
+                from {queens.windDir}
+              </div>
+            </div>
+            <div style={{ fontSize: 12, color: C.inkSoft, marginTop: 6 }}>
+              {typeof queens.gustSpeed === "number"
+                ? <>gusting <strong style={{ color: windColor(queens.gustSpeed) }}>{Math.round(queens.gustSpeed)} kn</strong>
+                    {queens.gustDir ? ` ${queens.gustDir}` : ""}</>
+                : "gust n/a"}
+            </div>
+            {ago(queens.dateTime) && (
+              <div style={{ fontSize: 11, color: C.inkSoft, marginTop: 4 }}>
+                measured {ago(queens.dateTime)}
+              </div>
+            )}
+          </>
+        ) : (
+          <div style={{ fontSize: 13, color: C.inkSoft }}>no wind reading</div>
+        )}
+      </div>
+
+      {/* Docks tide */}
+      <div style={stat}>
+        <div style={{ ...label, marginBottom: 8 }}>Docks — tide</div>
+        {docks && typeof docks.observed === "number" ? (
+          <>
+            <div style={{
+              fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 44,
+              lineHeight: 0.95, color: C.seaDeep,
+            }}>
+              {docks.observed.toFixed(2)}
+              <span style={{ fontSize: 15, color: C.inkSoft, fontWeight: 500 }}> m</span>
+            </div>
+            <div style={{ fontSize: 12, color: C.inkSoft, marginTop: 6 }}>
+              observed · predicted{" "}
+              <strong style={{ color: C.ink }}>
+                {typeof docks.predicted === "number" ? docks.predicted.toFixed(2) : "—"} m
+              </strong>
+            </div>
+            {surge != null && (
+              <div style={{ fontSize: 12, marginTop: 4 }}>
+                surge{" "}
+                <strong style={{ color: surge >= 0 ? C.sea : C.wait }}>
+                  {surge >= 0 ? "+" : ""}{surge.toFixed(2)} m
+                </strong>
+                <span style={{ color: C.inkSoft }}> {surge >= 0 ? "above" : "below"} prediction</span>
+              </div>
+            )}
+            {ago(docks.dateTime) && (
+              <div style={{ fontSize: 11, color: C.inkSoft, marginTop: 4 }}>
+                measured {ago(docks.dateTime)}
+              </div>
+            )}
+          </>
+        ) : (
+          <div style={{ fontSize: 13, color: C.inkSoft }}>no tide reading</div>
+        )}
       </div>
     </div>
   );
