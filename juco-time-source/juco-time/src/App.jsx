@@ -195,6 +195,15 @@ const FONTS = `
 // localStorage key for the accumulated AP observed-tide history.
 const AP_HISTORY_KEY = "juco.apHistory.v1";
 
+// Halo behind SVG chart text: paints a cream stroke under the fill so labels
+// stay readable where they cross grid lines, fills and coloured bands.
+const textHalo = {
+  stroke: C.panel,
+  strokeWidth: 3,
+  paintOrder: "stroke",
+  strokeLinejoin: "round",
+};
+
 // Shared "small caps" section-label style. Module-level so components defined
 // outside App (e.g. LocalLive) can use it too.
 const label = {
@@ -757,7 +766,7 @@ export default function App() {
                 <g key={"h" + h}>
                   <line x1={PL} x2={W - PR} y1={yOf(h)} y2={yOf(h)}
                     stroke={C.lineSoft} strokeWidth={1} />
-                  <text x={PL - 6} y={yOf(h) + 3} textAnchor="end"
+                  <text {...textHalo} x={PL - 6} y={yOf(h) + 3} textAnchor="end"
                     fontSize={10} fill={C.inkSoft} fontFamily="'Spline Sans Mono', monospace">{h}</text>
                 </g>
               ))}
@@ -766,7 +775,7 @@ export default function App() {
                 <g key={"v" + hr}>
                   <line x1={xOf(hr * 60)} x2={xOf(hr * 60)} y1={PT} y2={PT + plotH}
                     stroke={C.lineSoft} strokeWidth={1} />
-                  <text x={xOf(hr * 60)} y={H - 10} textAnchor="middle"
+                  <text {...textHalo} x={xOf(hr * 60)} y={H - 10} textAnchor="middle"
                     fontSize={10} fill={C.inkSoft} fontFamily="'Spline Sans Mono', monospace">
                     {String(hr).padStart(2, "0")}
                   </text>
@@ -790,7 +799,7 @@ export default function App() {
               {/* threshold line — drawn on top of curve so it stays visible */}
               <line x1={PL} x2={W - PR} y1={yOf(threshold)} y2={yOf(threshold)}
                 stroke={C.go} strokeWidth={2.4} />
-              <text x={W - PR - 4} y={yOf(threshold) - 5} textAnchor="end"
+              <text {...textHalo} x={W - PR - 4} y={yOf(threshold) - 5} textAnchor="end"
                 fontSize={11} fill={C.go} fontWeight={700} fontFamily="Archivo">
                 launch limit · {threshold.toFixed(1)} m
               </text>
@@ -802,7 +811,7 @@ export default function App() {
                   <g key={"e" + i}>
                     <circle cx={xOf(m)} cy={yOf(e.h)} r={4} fill={high ? C.sea : C.wait}
                       stroke="#fff" strokeWidth={1.5} />
-                    <text x={xOf(m)} y={yOf(e.h) + (high ? -10 : 18)} textAnchor="middle"
+                    <text {...textHalo} x={xOf(m)} y={yOf(e.h) + (high ? -10 : 18)} textAnchor="middle"
                       fontSize={10.5} fontWeight={700} fill={high ? C.sea : C.wait}
                       fontFamily="Archivo">
                       {high ? "HW " : "LW "}{fmtTime(e.date)}
@@ -819,7 +828,7 @@ export default function App() {
                     <circle cx={xOf(nowM)} cy={yOf(live.h)} r={5} fill={C.red}
                       stroke="#fff" strokeWidth={2} />
                   )}
-                  <text x={xOf(nowM)} y={PT - 4} textAnchor="middle"
+                  <text {...textHalo} x={xOf(nowM)} y={PT - 4} textAnchor="middle"
                     fontSize={10} fontWeight={700} fill={C.red} fontFamily="Archivo">NOW</text>
                 </g>
               )}
@@ -836,7 +845,7 @@ export default function App() {
                     width={9} height={9} fill="#6d4ca8" stroke="#fff" strokeWidth={1.6}
                     transform={`rotate(45 ${xOf(nowM)} ${yOf(apObserved)})`}
                   />
-                  <text x={xOf(nowM) + 8} y={yOf(apObserved) + 3} textAnchor="start"
+                  <text {...textHalo} x={xOf(nowM) + 8} y={yOf(apObserved) + 3} textAnchor="start"
                     fontSize={10.5} fontWeight={700} fill="#6d4ca8" fontFamily="Archivo">
                     AP {apObserved.toFixed(2)} m
                   </text>
@@ -1619,7 +1628,7 @@ function WindChart({ pts, now, live }) {
             return (
               <g key={"y" + v}>
                 <line x1={PL} x2={W - PR} y1={yOf(v)} y2={yOf(v)} stroke={C.lineSoft} strokeWidth={1} />
-                <text x={PL - 5} y={yOf(v) + 3} textAnchor="end" fontSize={10} fill={C.inkSoft}
+                <text {...textHalo} x={PL - 5} y={yOf(v) + 3} textAnchor="end" fontSize={10} fill={C.inkSoft}
                   fontFamily="'Spline Sans Mono', monospace">{v}</text>
               </g>
             );
@@ -1628,7 +1637,7 @@ function WindChart({ pts, now, live }) {
           {ticks.map((ms, i) => (
             <g key={"x" + i}>
               <line x1={xOf(ms)} x2={xOf(ms)} y1={PT} y2={PT + plotH} stroke={C.lineSoft} strokeWidth={1} />
-              <text x={xOf(ms)} y={H - 9} textAnchor="middle" fontSize={10} fill={C.inkSoft}
+              <text {...textHalo} x={xOf(ms)} y={H - 9} textAnchor="middle" fontSize={10} fill={C.inkSoft}
                 fontFamily="'Spline Sans Mono', monospace">
                 {i === ticks.length - 1 ? "now" : fmtTime(new Date(ms))}
               </text>
