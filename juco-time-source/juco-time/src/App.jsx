@@ -192,6 +192,9 @@ const FONTS = `
 }
 `;
 
+// localStorage key for the accumulated AP observed-tide history.
+const AP_HISTORY_KEY = "juco.apHistory.v1";
+
 // Shared "small caps" section-label style. Module-level so components defined
 // outside App (e.g. LocalLive) can use it too.
 const label = {
@@ -214,11 +217,39 @@ export default function App() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [gaugeStation, setGaugeStation] = useState("Newlyn");
   const [gauge, setGauge] = useState(null);
+  // Accumulated AP (Falmouth Docks) observed-tide readings, persisted across
+  // reloads so the day chart builds up a real observed track over the day.
+  const [apHistory, setApHistory] = useState(() => {
+    try {
+      const raw = localStorage.getItem(AP_HISTORY_KEY);
+      const arr = raw ? JSON.parse(raw) : [];
+      return Array.isArray(arr) ? arr.filter((p) => p && typeof p.t === "number" && typeof p.v === "number") : [];
+    } catch { return []; }
+  });
 
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 30000);
     return () => clearInterval(id);
   }, []);
+
+  // Append each fresh AP observed reading to the persisted history (deduped by
+  // its measurement timestamp; kept to the last 36 h).
+  useEffect(() => {
+    if (!portlog || portlog.error) return;
+    const d = portlog.docks;
+    if (!d || typeof d.observed !== "number") return;
+    const dt = parsePortlogTime(d.dateTime);
+    const tMs = dt ? dt.getTime() : Date.now();
+    setApHistory((prev) => {
+      if (prev.some((p) => Math.abs(p.t - tMs) < 60000)) return prev;
+      const cutoff = Date.now() - 36 * 3600 * 1000;
+      const next = [...prev, { t: tMs, v: d.observed }]
+        .filter((p) => p.t >= cutoff)
+        .sort((a, b) => a.t - b.t);
+      try { localStorage.setItem(AP_HISTORY_KEY, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }, [portlog]);
 
   // ---- weather forecast (Open-Meteo, no API key, CORS-friendly) ----
   useEffect(() => {
@@ -452,6 +483,21 @@ export default function App() {
     portlog && portlog.docks && typeof portlog.docks.observed === "number"
       ? portlog.docks.observed
       : null;
+
+  // Accumulated AP observed track, clipped to the displayed day → purple dotted line.
+  const apTrackPts = apHistory
+    .map((p) => ({ t: p.t, v: p.v }))
+    .filter((p) => p.t >= day.start && p.t <= day.end)
+    .sort((a, b) => a.t - b.t);
+  const apTrackPath =
+    apTrackPts.length > 1
+      ? apTrackPts
+          .map((p, i) => {
+            const m = (p.t - day.start) / 60000;
+            return `${i === 0 ? "M" : "L"}${xOf(m).toFixed(1)},${yOf(p.v).toFixed(1)}`;
+          })
+          .join(" ")
+      : "";
 
   // current launch status (live)
   const liveLaunch = inRange ? live.h >= threshold : null;
@@ -692,7 +738,7 @@ export default function App() {
           }}>
             <LegendItem color={C.seaDeep} label="Falmouth prediction" />
             {gaugeLinePath && <LegendItem color="#c47150" label={`${gaugeStation} observed`} dashed />}
-            {showNowMark && apObserved != null && <LegendItem color="#6d4ca8" label="AP observed (now)" />}
+            {(apTrackPath || (showNowMark && apObserved != null)) && <LegendItem color="#6d4ca8" label="AP observed" dashed />}
             <LegendItem color={C.go} label="launch limit" />
             <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
               <span style={{
@@ -778,6 +824,11 @@ export default function App() {
                 </g>
               )}
               {/* live AP (Falmouth Docks) observed height at now */}
+              {/* purple dotted track of accumulated AP observed heights */}
+              {apTrackPath && (
+                <path d={apTrackPath} fill="none" stroke="#6d4ca8" strokeWidth={1.8}
+                  strokeDasharray="2 4" strokeLinecap="round" strokeLinejoin="round" />
+              )}
               {showNowMark && apObserved != null && (
                 <g>
                   <rect
@@ -1147,7 +1198,7 @@ export default function App() {
           textAlign: "center", fontSize: 11, color: C.inkSoft, marginTop: 20,
           fontFamily: "'Spline Sans Mono', monospace",
         }}>
-          JUCO TIME · FALMOUTH HARBOUR · DATA 19 APR – 30 JUN 2026
+          JUCO TIME · FALMOUTH HARBOUR · A BOOM PRODUCTION
         </p>
       </div>
     </div>
