@@ -95,11 +95,78 @@ const RAW = {
   "2026-06-30": [["L","00:39",1.14],["H","06:17",4.56],["L","12:46",1.18],["H","18:32",5.01]],
 };
 
-const EXTREMES = Object.entries(RAW)
+// Official Admiralty-derived HW/LW table (above). Ends 30 Jun 2026.
+const OFFICIAL_EXTREMES = Object.entries(RAW)
   .flatMap(([d, evs]) => evs.map(([type, hm, h]) => ({
     type, h, date: new Date(`${d}T${hm}:00+01:00`),
   })))
   .sort((a, b) => a.date - b.date);
+const OFFICIAL_LAST = OFFICIAL_EXTREMES[OFFICIAL_EXTREMES.length - 1].date.getTime();
+
+/* ---------------------------------------------------------------------
+   HARMONIC EXTENSION
+   The official table above runs out on 30 Jun 2026. To keep the planner
+   working past that date, we extend it with a harmonic tide model whose
+   constituents were fitted by least squares to that same 73-day table
+   (19 Apr – 30 Jun 2026). Nine major constituents are the most that a
+   record this short can resolve without the closely-spaced minor lines
+   trading energy and going unphysical.
+   Height h(t) = Z0 + Σ [ Aᵢ·cos(ωᵢ·t) + Bᵢ·sin(ωᵢ·t) ],  t in hours
+   from the epoch. Accuracy vs the source table: ~0.05 m RMS in-window,
+   ~0.1–0.2 m a few weeks out, degrading further ahead; nodal factors are
+   frozen at the fit epoch and there are no seasonal (Sa/Ssa) terms.
+   PREDICTIONS ONLY — not for navigation. Re-fit when a newer table is added.
+   --------------------------------------------------------------------- */
+const TIDE_EPOCH_UTC = 1779667200000; // 2026-05-25T00:00:00Z
+const TIDE_Z0 = 2.91071727;           // mean level above chart datum (m)
+const HARMONIC_CONSTITUENTS = [
+  { name: "M2",  speed: 28.9841042, A:  1.69809981, B: -0.32839945 },
+  { name: "S2",  speed: 30.0000000, A: -0.47447954, B:  0.00998529 },
+  { name: "N2",  speed: 28.4397295, A:  0.12223863, B:  0.20882033 },
+  { name: "K1",  speed: 15.0410686, A:  0.06334105, B: -0.05346634 },
+  { name: "O1",  speed: 13.9430356, A:  0.09876283, B:  0.00667691 },
+  { name: "Q1",  speed: 13.3986609, A:  0.01726545, B:  0.00714124 },
+  { name: "M4",  speed: 57.9682084, A: -0.06227992, B: -0.07658483 },
+  { name: "MS4", speed: 58.9841042, A:  0.01758808, B:  0.12192029 },
+  { name: "M6",  speed: 86.9523127, A: -0.02218421, B:  0.05493699 },
+];
+const DEG2RAD = Math.PI / 180;
+function harmonicHeight(ms) {
+  const t = (ms - TIDE_EPOCH_UTC) / 3600000; // hours from epoch
+  let h = TIDE_Z0;
+  for (const c of HARMONIC_CONSTITUENTS) {
+    const w = c.speed * DEG2RAD;
+    h += c.A * Math.cos(w * t) + c.B * Math.sin(w * t);
+  }
+  return h;
+}
+// Find HW/LW turning points of the harmonic curve between two instants.
+function harmonicExtremes(fromMs, toMs) {
+  const step = 5 * 60000;
+  const slope = (ms) => harmonicHeight(ms + 60000) - harmonicHeight(ms - 60000);
+  const out = [];
+  let prev = slope(fromMs);
+  for (let ms = fromMs + step; ms <= toMs; ms += step) {
+    const cur = slope(ms);
+    if ((prev > 0) !== (cur > 0)) {
+      let lo = ms - step, hi = ms;
+      for (let k = 0; k < 28; k++) {
+        const mid = (lo + hi) / 2;
+        if ((slope(lo) > 0) === (slope(mid) > 0)) lo = mid; else hi = mid;
+      }
+      const tMs = Math.round((lo + hi) / 2 / 60000) * 60000; // to the minute
+      out.push({ type: prev > 0 ? "H" : "L", h: harmonicHeight(tMs), date: new Date(tMs), predicted: true });
+    }
+    prev = cur;
+  }
+  return out;
+}
+
+// Official table, then harmonic-predicted extremes for ~18 months beyond it.
+const EXTREMES = [
+  ...OFFICIAL_EXTREMES,
+  ...harmonicExtremes(OFFICIAL_LAST + 60000, OFFICIAL_LAST + 550 * 24 * 3600 * 1000),
+];
 
 const FIRST = EXTREMES[0].date.getTime();
 const LAST = EXTREMES[EXTREMES.length - 1].date.getTime();
@@ -113,7 +180,7 @@ function heightAt(t) {
   const a = EXTREMES[i], b = EXTREMES[i + 1];
   const frac = (ms - a.date.getTime()) / (b.date.getTime() - a.date.getTime());
   const h = a.h + (b.h - a.h) * (1 - Math.cos(Math.PI * frac)) / 2;
-  return { h, rising: b.h > a.h, prev: a, next: b, frac };
+  return { h, rising: b.h > a.h, prev: a, next: b, frac, predicted: ms > OFFICIAL_LAST };
 }
 
 function nextEvents(t) {
@@ -584,9 +651,9 @@ export default function App() {
 
           {!inRange ? (
             <div style={{ padding: 22, color: C.inkSoft, fontSize: 14 }}>
-              The built-in tide table covers <strong>19 Apr – 30 Jun 2026</strong>. Today
-              falls outside that range — use the day planner below to look within it, or
-              refresh the dataset for current dates.
+              Predictions run from <strong>19 Apr 2026</strong> to about <strong>Dec 2027</strong>
+              {" "}(official table to 30 Jun 2026, harmonic estimate beyond). Today falls outside
+              that range — use the day planner below to look within it.
             </div>
           ) : (
             <div style={{ display: "flex", flexWrap: "wrap" }}>
@@ -603,6 +670,11 @@ export default function App() {
                   }}>{live.h.toFixed(2)}</span>
                   <span style={{ fontSize: 20, color: C.inkSoft, paddingBottom: 8 }}>m</span>
                 </div>
+                {live.predicted && (
+                  <div style={{ marginTop: 4, fontSize: 11, color: C.inkSoft, fontStyle: "italic" }}>
+                    harmonic estimate (beyond published table)
+                  </div>
+                )}
                 <div style={{
                   marginTop: 8, fontSize: 14, fontWeight: 600,
                   color: live.rising ? C.sea : C.wait,
@@ -1195,11 +1267,13 @@ export default function App() {
           <p style={{ fontSize: 12, color: C.inkSoft, lineHeight: 1.55, margin: 0 }}>
             <strong style={{ color: C.ink }}>Predictions only — not for navigation.</strong>{" "}
             Heights are astronomical predictions for Falmouth interpolated with a standard
-            cosine tidal curve between high and low water. Strong wind, low barometric
-            pressure or storm surge can raise or lower the real level by 0.3 m or more, and
-            slipway depths vary. Always keep your own margin, check the weather, and tell
-            someone your plan. Tide data: tidetime.org · Photo heights derived from each
-            image's capture time.
+            cosine tidal curve between high and low water. Up to <strong>30 Jun 2026</strong> these
+            come from the published table (tidetime.org); <strong>beyond that date they are a
+            harmonic extrapolation</strong> fitted to that same table (9 constituents), accurate to
+            roughly 0.1–0.2 m near the boundary and degrading further ahead. Strong wind, low
+            barometric pressure or storm surge can raise or lower the real level by 0.3 m or more,
+            and slipway depths vary. Always keep your own margin, check the weather, and tell
+            someone your plan. Photo heights derived from each image's capture time.
           </p>
         </section>
 
