@@ -192,6 +192,115 @@ const FONTS = `
 }
 `;
 
+/* ---------------------------------------------------------------------
+   Live observed-gauge sources + persistence.
+
+   Falmouth's own Docks gauge (via the Port-Log proxy) exposes only ONE live
+   reading per poll, so we remember readings in localStorage and accumulate
+   them into a trace over the window. EA gauges return ~18 h of history, but we
+   persist those too so the observed line survives reloads and keeps filling.
+   --------------------------------------------------------------------- */
+const GAUGES = {
+  Falmouth:  { label: "Falmouth Docks", kind: "portlog", datum: "docks", pollMs: 5 * 60 * 1000 },
+  Newlyn:    { label: "Newlyn",         kind: "ea",      datum: "local", pollMs: 15 * 60 * 1000 },
+  Devonport: { label: "Devonport",      kind: "ea",      datum: "local", pollMs: 15 * 60 * 1000 },
+};
+const GAUGE_ORDER = ["Falmouth", "Newlyn", "Devonport"];
+
+const OBS_WINDOW_MS = 48 * 3600 * 1000; // keep ~2 days of remembered readings
+const obsKey = (station) => `juco.obs.${station}`;
+
+// Remembered readings for a station as [{t: ms, v}], pruned to the window.
+function loadRemembered(station) {
+  try {
+    const raw = localStorage.getItem(obsKey(station));
+    if (!raw) return [];
+    const cutoff = Date.now() - OBS_WINDOW_MS;
+    return JSON.parse(raw)
+      .filter((r) => r && typeof r.t === "number" && typeof r.v === "number" && !isNaN(r.v) && r.t >= cutoff)
+      .sort((a, b) => a.t - b.t);
+  } catch {
+    return [];
+  }
+}
+
+// Merge incoming [{t: ms, v}] with remembered, dedupe by 1-minute bucket,
+// prune to the window, persist, and return the merged list.
+function remember(station, incoming) {
+  const cutoff = Date.now() - OBS_WINDOW_MS;
+  const map = new Map();
+  const add = (r) => {
+    if (!r || typeof r.v !== "number" || isNaN(r.v) || typeof r.t !== "number" || r.t < cutoff) return;
+    map.set(Math.round(r.t / 60000), { t: r.t, v: r.v });
+  };
+  loadRemembered(station).forEach(add);
+  (incoming || []).forEach(add);
+  const merged = [...map.values()].sort((a, b) => a.t - b.t);
+  try {
+    localStorage.setItem(obsKey(station), JSON.stringify(merged));
+  } catch {
+    /* storage unavailable — degrade to in-memory only */
+  }
+  return merged;
+}
+
+// ms-based readings -> Date-based readings the chart + GaugeView expect.
+const toDated = (rows) => rows.map((r) => ({ t: new Date(r.t), v: r.v }));
+
+// Latest Falmouth Docks reading via our Netlify proxy (one live point per poll).
+async function fetchFalmouth() {
+  const r = await fetch("/api/falmouth-tide", { headers: { accept: "application/json" } });
+  if (!r.ok) throw new Error("proxy " + r.status);
+  const j = await r.json();
+  if (j.error) throw new Error(j.error);
+  if (typeof j.observed !== "number" || isNaN(j.observed)) throw new Error("no observed value");
+  const t = j.time ? new Date(j.time).getTime() : Date.now();
+  return {
+    chosen: { station: { label: GAUGES.Falmouth.label }, datum: "docks" },
+    incoming: [{ t, v: j.observed }],
+    meta: { predicted: j.predicted, surge: j.surge },
+  };
+}
+
+// ~18 h of Environment Agency readings for Newlyn / Devonport.
+async function fetchEA(station) {
+  const sr = await fetch(
+    "https://environment.data.gov.uk/flood-monitoring/id/stations?type=TideGauge&label=" +
+    encodeURIComponent(station)
+  );
+  if (!sr.ok) throw new Error("stations " + sr.status);
+  const sd = await sr.json();
+  const items = sd.items || [];
+  if (!items.length) throw new Error(`no station "${station}"`);
+
+  // Stations come in pairs — one in local chart datum (ends "-m"), one in mAOD.
+  // Prefer local: it matches the chart-datum heights used in tide tables.
+  let chosen = null;
+  for (const s of items) {
+    const ms = s.measures ? (Array.isArray(s.measures) ? s.measures : [s.measures]) : [];
+    for (const m of ms) {
+      if (m && m["@id"] && m["@id"].endsWith("-m")) { chosen = { station: s, measure: m, datum: "local" }; break; }
+    }
+    if (chosen) break;
+  }
+  if (!chosen) {
+    const s = items[0];
+    const ms = s.measures ? (Array.isArray(s.measures) ? s.measures : [s.measures]) : [];
+    if (!ms.length) throw new Error("no measures");
+    chosen = { station: s, measure: ms[0], datum: ms[0]["@id"].endsWith("mAOD") ? "AOD" : "?" };
+  }
+
+  const since = new Date(Date.now() - 18 * 3600 * 1000).toISOString();
+  const measureUrl = chosen.measure["@id"].replace(/^http:/, "https:");
+  const rr = await fetch(`${measureUrl}/readings?since=${encodeURIComponent(since)}&_sorted`);
+  if (!rr.ok) throw new Error("readings " + rr.status);
+  const rd = await rr.json();
+  const incoming = (rd.items || [])
+    .map((r) => ({ t: new Date(r.dateTime).getTime(), v: Number(r.value) }))
+    .filter((r) => !isNaN(r.v) && !isNaN(r.t));
+  return { chosen, incoming, meta: null };
+}
+
 export default function App() {
   const [now, setNow] = useState(() => new Date());
   const [selISO, setSelISO] = useState(() => {
@@ -203,7 +312,7 @@ export default function App() {
 
   const [weather, setWeather] = useState(null);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [gaugeStation, setGaugeStation] = useState("Newlyn");
+  const [gaugeStation, setGaugeStation] = useState("Falmouth");
   const [gauge, setGauge] = useState(null);
 
   useEffect(() => {
@@ -244,64 +353,36 @@ export default function App() {
     return () => { cancelled = true; clearInterval(id); };
   }, [refreshKey]);
 
-  // ---- live tide gauge (Environment Agency / BODC, 15-min mean sea level) ----
+  // ---- live tide gauge (accumulated + remembered across polls) ----
   useEffect(() => {
     let cancelled = false;
-    setGauge(null);
+    const cfg = GAUGES[gaugeStation] || GAUGES.Newlyn;
+    const placeholder = (extra) => ({
+      chosen: { station: { label: cfg.label }, datum: cfg.datum },
+      readings: toDated(loadRemembered(gaugeStation)),
+      ...extra,
+    });
+
+    // Seed from remembered readings so the observed line doesn't blank out
+    // while the next fetch is in flight.
+    const seeded = placeholder({ stale: true });
+    setGauge(seeded.readings.length ? seeded : null);
+
     async function load() {
       try {
-        // 1. find the station by label
-        const sr = await fetch(
-          "https://environment.data.gov.uk/flood-monitoring/id/stations?type=TideGauge&label=" +
-          encodeURIComponent(gaugeStation)
-        );
-        if (!sr.ok) throw new Error("stations " + sr.status);
-        const sd = await sr.json();
-        const items = sd.items || [];
-        if (!items.length) throw new Error(`no station "${gaugeStation}"`);
-
-        // Stations come in pairs — one with measure in local chart datum (ends "-m"),
-        // one in metres above Ordnance Datum Newlyn (mAOD). Prefer local: it matches
-        // the chart-datum heights used in tide tables.
-        let chosen = null;
-        for (const s of items) {
-          const ms = s.measures ? (Array.isArray(s.measures) ? s.measures : [s.measures]) : [];
-          for (const m of ms) {
-            if (m && m["@id"] && m["@id"].endsWith("-m")) {
-              chosen = { station: s, measure: m, datum: "local" };
-              break;
-            }
-          }
-          if (chosen) break;
-        }
-        if (!chosen) {
-          const s = items[0];
-          const ms = s.measures ? (Array.isArray(s.measures) ? s.measures : [s.measures]) : [];
-          if (!ms.length) throw new Error("no measures");
-          chosen = { station: s, measure: ms[0], datum: ms[0]["@id"].endsWith("mAOD") ? "AOD" : "?" };
-        }
-
-        // 2. fetch the last ~18 hours of readings
-        const since = new Date(Date.now() - 18 * 3600 * 1000).toISOString();
-        const measureUrl = chosen.measure["@id"].replace(/^http:/, "https:");
-        const rr = await fetch(
-          `${measureUrl}/readings?since=${encodeURIComponent(since)}&_sorted`
-        );
-        if (!rr.ok) throw new Error("readings " + rr.status);
-        const rd = await rr.json();
-        const readings = (rd.items || [])
-          .map((r) => ({ t: new Date(r.dateTime), v: Number(r.value) }))
-          .filter((r) => !isNaN(r.v) && !isNaN(r.t.getTime()))
-          .sort((a, b) => a.t - b.t);
-
+        const { chosen, incoming, meta } =
+          cfg.kind === "portlog" ? await fetchFalmouth() : await fetchEA(gaugeStation);
         if (cancelled) return;
-        setGauge({ chosen, readings });
+        setGauge({ chosen, readings: toDated(remember(gaugeStation, incoming)), meta });
       } catch (e) {
-        if (!cancelled) setGauge({ error: String(e.message || e) });
+        if (cancelled) return;
+        // Keep any remembered trace visible; annotate with the error.
+        const kept = placeholder({ error: String(e.message || e), stale: true });
+        setGauge(kept.readings.length ? kept : { error: String(e.message || e) });
       }
     }
     load();
-    const id = setInterval(load, 15 * 60 * 1000);
+    const id = setInterval(load, cfg.pollMs);
     return () => { cancelled = true; clearInterval(id); };
   }, [gaugeStation]);
 
@@ -669,11 +750,19 @@ export default function App() {
               {/* tide curve (Falmouth prediction) */}
               {areaPath && <path d={areaPath} fill={C.seaFill} />}
               {linePath && <path d={linePath} fill="none" stroke={C.seaDeep} strokeWidth={2.4} />}
-              {/* Newlyn/Devonport observed (overlaid on prediction) */}
+              {/* observed gauge line (overlaid on prediction) */}
               {gaugeLinePath && (
                 <path d={gaugeLinePath} fill="none" stroke="#c47150"
                   strokeWidth={1.9} strokeDasharray="5 3"
                   strokeLinecap="round" strokeLinejoin="round" />
+              )}
+              {/* single remembered point before a trace has built up */}
+              {gaugePts.length === 1 && (
+                <circle
+                  cx={xOf((gaugePts[0].t.getTime() - day.start) / 60000)}
+                  cy={yOf(gaugePts[0].v)}
+                  r={3.5} fill="#c47150" stroke="#fff" strokeWidth={1.2}
+                />
               )}
               {/* threshold line — drawn on top of curve so it stays visible */}
               <line x1={PL} x2={W - PR} y1={yOf(threshold)} y2={yOf(threshold)}
@@ -913,23 +1002,25 @@ export default function App() {
           </div>
         </section>
 
-        {/* ---------- LIVE TIDE GAUGE (Environment Agency / BODC) ---------- */}
+        {/* ---------- LIVE TIDE GAUGE (Falmouth Docks / Port-Log · EA fallback) ---------- */}
         <section style={{ ...card, marginBottom: 16 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
             <span style={label}>Live tide gauge · {gaugeStation}</span>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <a
-                href={`https://ntslf.org/tides/uk-network/realtime?port=${gaugeStation === "Devonport" ? "Plymouth" : gaugeStation}`}
+                href={gaugeStation === "Falmouth"
+                  ? "https://apfalmouth.port-log.net/live/Display.php"
+                  : `https://ntslf.org/tides/uk-network/realtime?port=${gaugeStation === "Devonport" ? "Plymouth" : gaugeStation}`}
                 target="_blank" rel="noopener noreferrer"
                 style={{
                   fontSize: 11, color: C.seaDeep, fontWeight: 700,
                   letterSpacing: "0.05em", textDecoration: "none",
                   fontFamily: "'Spline Sans Mono', monospace",
                 }}>
-                NTSLF LIVE ↗
+                {gaugeStation === "Falmouth" ? "PORT-LOG LIVE ↗" : "NTSLF LIVE ↗"}
               </a>
               <div style={{ display: "flex", gap: 4 }}>
-              {["Newlyn", "Devonport"].map((n) => {
+              {GAUGE_ORDER.map((n) => {
                 const on = gaugeStation === n;
                 return (
                   <button key={n} onClick={() => setGaugeStation(n)}
@@ -953,24 +1044,44 @@ export default function App() {
             <p style={{ fontSize: 13, color: C.inkSoft, margin: "12px 0 0" }}>
               Loading observed sea level…
             </p>
-          ) : gauge.error ? (
+          ) : gauge.error && !(gauge.readings && gauge.readings.length) ? (
             <p style={{ fontSize: 13, color: C.danger, margin: "12px 0 0", lineHeight: 1.5 }}>
               Gauge data unavailable ({gauge.error}).
             </p>
-          ) : gauge.readings.length === 0 ? (
-            <p style={{ fontSize: 13, color: C.danger, margin: "12px 0 0" }}>
-              No recent readings available — gauge may be offline.
+          ) : !gauge.readings || gauge.readings.length === 0 ? (
+            <p style={{ fontSize: 13, color: C.inkSoft, margin: "12px 0 0" }}>
+              No readings yet — the trace builds as data arrives.
             </p>
           ) : (
-            <GaugeView data={gauge} />
+            <>
+              {gauge.error && (
+                <p style={{ fontSize: 12, color: C.danger, margin: "12px 0 0" }}>
+                  Live fetch failed ({gauge.error}) — showing remembered readings.
+                </p>
+              )}
+              <GaugeView data={gauge} />
+              {gauge.meta && typeof gauge.meta.surge === "number" && (
+                <div style={{ fontSize: 12, color: C.inkSoft, marginTop: 8 }}>
+                  Predicted{" "}
+                  <strong style={{ color: C.ink }}>{gauge.meta.predicted.toFixed(2)} m</strong>
+                  {" · "}surge{" "}
+                  <strong style={{ color: gauge.meta.surge >= 0 ? C.sea : C.wait }}>
+                    {gauge.meta.surge >= 0 ? "+" : ""}{gauge.meta.surge.toFixed(2)} m
+                  </strong>
+                </div>
+              )}
+            </>
           )}
 
           <p style={{ fontSize: 11, color: C.inkSoft, margin: "14px 0 0", lineHeight: 1.55, paddingTop: 10, borderTop: `1px solid ${C.lineSoft}` }}>
-            Falmouth has no national tide gauge of its own. <strong>Newlyn</strong> (~30 km SW)
-            is the nearest — almost identical timing and range to Falmouth.{" "}
-            <strong>Devonport</strong> (~70 km E, in Plymouth) is the standard port
-            from which Falmouth predictions are derived. Data: Environment Agency
-            real-time flood-monitoring API · 15-minute means · archived by <a href="https://www.bodc.ac.uk/data/hosted_data_systems/sea_level/uk_tide_gauge_network/" target="_blank" rel="noopener noreferrer" style={{ color: C.seaDeep, fontWeight: 600, textDecoration: "underline" }}>BODC</a>.
+<strong>Falmouth Docks</strong> is the town's own harbour gauge, via{" "}
+            <a href="https://apfalmouth.port-log.net/live/Display.php" target="_blank" rel="noopener noreferrer" style={{ color: C.seaDeep, fontWeight: 600, textDecoration: "underline" }}>Port-Log</a>{" "}
+            (OceanWise). It publishes one live reading at a time, so the observed trace is
+            built up and remembered as readings arrive.{" "}
+            <strong>Newlyn</strong> (~30 km SW) and <strong>Devonport</strong> (~70 km E)
+            are the national Environment Agency gauges — Newlyn matches Falmouth's timing
+            and range closely, Devonport is the standard port Falmouth predictions derive
+            from · EA readings archived by <a href="https://www.bodc.ac.uk/data/hosted_data_systems/sea_level/uk_tide_gauge_network/" target="_blank" rel="noopener noreferrer" style={{ color: C.seaDeep, fontWeight: 600, textDecoration: "underline" }}>BODC</a>.
           </p>
         </section>
 
@@ -1119,6 +1230,7 @@ function GaugeView({ data }) {
 
   const datumLabel =
     chosen.datum === "local" ? "m above chart datum"
+    : chosen.datum === "docks" ? "m (Docks gauge)"
     : chosen.datum === "AOD" ? "mAOD"
     : "m";
 
