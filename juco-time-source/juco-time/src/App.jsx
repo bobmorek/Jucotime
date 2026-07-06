@@ -208,6 +208,13 @@ function shiftISO(iso, days) {
   d.setDate(d.getDate() + days);
   return d.toLocaleDateString("en-CA", { timeZone: TZ });
 }
+// A day is plannable if its midday falls within the predictable range — the
+// official table plus the harmonic extension (FIRST … LAST), not just the
+// raw table. Lets the planner default to and navigate real current dates.
+function dayAvailable(iso) {
+  const noon = isoToDate(iso, "12:00").getTime();
+  return noon > FIRST && noon < LAST;
+}
 function durStr(ms) {
   if (ms < 0) ms = 0;
   const m = Math.round(ms / 60000);
@@ -282,7 +289,7 @@ export default function App() {
   const [now, setNow] = useState(() => new Date());
   const [selISO, setSelISO] = useState(() => {
     const t = todayISO();
-    return RAW[t] ? t : "2026-05-14";
+    return dayAvailable(t) ? t : "2026-05-14";
   });
   const [threshold, setThreshold] = useState(1.3);
   const [activeSlip, setActiveSlip] = useState("Grove Place slip");
@@ -797,8 +804,8 @@ export default function App() {
               )}
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <button onClick={() => setSelISO(shiftISO(selISO, -1))} disabled={!RAW[shiftISO(selISO, -1)]}
-                style={navBtn(RAW[shiftISO(selISO, -1)])}>‹</button>
+              <button onClick={() => setSelISO(shiftISO(selISO, -1))} disabled={!dayAvailable(shiftISO(selISO, -1))}
+                style={navBtn(dayAvailable(shiftISO(selISO, -1)))}>‹</button>
               <span style={{
                 fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 18, minWidth: 132, textAlign: "center",
               }}>
@@ -806,9 +813,13 @@ export default function App() {
                 {selISO === todayISO() && (
                   <span style={{ color: C.red, fontSize: 12, fontFamily: "Archivo", marginLeft: 6 }}>TODAY</span>
                 )}
+                {isoToDate(selISO, "12:00").getTime() > OFFICIAL_LAST && (
+                  <span title="Harmonic estimate — beyond the official table (to 30 Jun 2026)"
+                    style={{ color: C.wait, fontSize: 11, fontWeight: 700, fontFamily: "Archivo", marginLeft: 6 }}>≈ EST</span>
+                )}
               </span>
-              <button onClick={() => setSelISO(shiftISO(selISO, 1))} disabled={!RAW[shiftISO(selISO, 1)]}
-                style={navBtn(RAW[shiftISO(selISO, 1)])}>›</button>
+              <button onClick={() => setSelISO(shiftISO(selISO, 1))} disabled={!dayAvailable(shiftISO(selISO, 1))}
+                style={navBtn(dayAvailable(shiftISO(selISO, 1)))}>›</button>
             </div>
           </div>
 
