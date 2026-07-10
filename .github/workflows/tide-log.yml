@@ -1,0 +1,49 @@
+name: Log Falmouth tide
+
+# Git-scraping: poll the Port-Log Falmouth Docks gauge on a schedule and commit
+# each reading, building an indefinite record for harmonic analysis.
+#
+# NOTE: GitHub only runs `schedule` triggers from workflows on the DEFAULT branch,
+# so this starts logging automatically once merged to main. Before then you can
+# run it by hand from the Actions tab (workflow_dispatch) on any branch.
+
+on:
+  schedule:
+    - cron: "*/30 * * * *" # every 30 min (UTC); GitHub may delay under load
+  workflow_dispatch: {}
+
+# Serialise runs so two never race to push.
+concurrency:
+  group: tide-log
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  log:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Fetch + append latest reading
+        run: node scripts/log-tide.mjs
+
+      - name: Commit if there is new data
+        run: |
+          if [[ -z "$(git status --porcelain data)" ]]; then
+            echo "No new reading this run — nothing to commit."
+            exit 0
+          fi
+          git config user.name "tide-logger[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data
+          STAMP=$(node -e "process.stdout.write(require('./data/tide/falmouth-docks/latest.json').time)" 2>/dev/null || date -u +%FT%TZ)
+          git commit -m "tide log: ${STAMP}"
+          # Re-sync in case main advanced while we were fetching, then push.
+          git pull --rebase origin "${GITHUB_REF_NAME}" || true
+          git push origin "HEAD:${GITHUB_REF_NAME}"
