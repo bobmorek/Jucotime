@@ -301,6 +301,38 @@ async function fetchEA(station) {
   return { chosen, incoming, meta: null };
 }
 
+// Committed Falmouth Docks history, scraped by the tide-log GitHub Action.
+// raw.githubusercontent.com serves with `access-control-allow-origin: *`, so the
+// browser can read the daily CSVs directly — the observed line then shows the full
+// server-collected trace for any day, not just what this browser happened to log.
+const DATA_REF = "main"; // branch the tide logger commits to
+const RAW_BASE = `https://raw.githubusercontent.com/bobmorek/Jucotime/${DATA_REF}/data/tide/falmouth-docks`;
+const utcDay = (ms) => new Date(ms).toISOString().slice(0, 10); // YYYY-MM-DD
+
+async function fetchFalmouthHistory(startMs, endMs) {
+  // The visible local day can straddle two UTC date files.
+  const days = [...new Set([utcDay(startMs), utcDay(endMs - 1)])];
+  const rows = [];
+  await Promise.all(
+    days.map(async (d) => {
+      try {
+        const r = await fetch(`${RAW_BASE}/${d.slice(0, 7)}/${d}.csv`, { cache: "no-store" });
+        if (!r.ok) return; // 404 = nothing logged for that day yet
+        const text = await r.text();
+        text.split("\n").slice(1).forEach((line) => {
+          const [t, obs] = line.split(",");
+          const ms = t ? new Date(t).getTime() : NaN;
+          const v = Number(obs);
+          if (!isNaN(ms) && !isNaN(v)) rows.push({ t: ms, v });
+        });
+      } catch {
+        /* offline / transient — fall back to live + remembered readings */
+      }
+    })
+  );
+  return rows.sort((a, b) => a.t - b.t);
+}
+
 export default function App() {
   const [now, setNow] = useState(() => new Date());
   const [selISO, setSelISO] = useState(() => {
@@ -314,11 +346,22 @@ export default function App() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [gaugeStation, setGaugeStation] = useState("Falmouth");
   const [gauge, setGauge] = useState(null);
+  const [hist, setHist] = useState([]); // committed Falmouth history for the selected day
 
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 30000);
     return () => clearInterval(id);
   }, []);
+
+  // ---- committed Falmouth Docks history for the day being viewed ----
+  useEffect(() => {
+    if (gaugeStation !== "Falmouth") { setHist([]); return; }
+    let cancelled = false;
+    const start = isoToDate(selISO, "00:00").getTime();
+    const end = start + 24 * 3600 * 1000;
+    fetchFalmouthHistory(start, end).then((rows) => { if (!cancelled) setHist(rows); });
+    return () => { cancelled = true; };
+  }, [gaugeStation, selISO, refreshKey]);
 
   // ---- weather forecast (Open-Meteo, no API key, CORS-friendly) ----
   useEffect(() => {
@@ -443,14 +486,23 @@ export default function App() {
     ? `${linePath} L${xOf(curvePts[curvePts.length - 1].m).toFixed(1)},${yOf(0)} L${xOf(curvePts[0].m).toFixed(1)},${yOf(0)} Z`
     : "";
 
-  // Selected-gauge observed line, clipped to the displayed day
-  const gaugePts =
-    gauge && Array.isArray(gauge.readings)
-      ? gauge.readings.filter((r) => {
-          const t = r.t.getTime();
-          return t >= day.start && t <= day.end;
-        })
-      : [];
+  // Observed readings = committed history (server-collected) merged with the
+  // live/remembered readings, deduped to the minute.
+  const observedReadings = useMemo(() => {
+    const map = new Map();
+    const add = (t, v) => {
+      if (typeof v === "number" && !isNaN(v)) map.set(Math.round(t / 60000), { t, v });
+    };
+    hist.forEach((r) => add(r.t, r.v));
+    if (gauge && Array.isArray(gauge.readings)) gauge.readings.forEach((r) => add(r.t.getTime(), r.v));
+    return [...map.values()].map((r) => ({ t: new Date(r.t), v: r.v })).sort((a, b) => a.t - b.t);
+  }, [gauge, hist]);
+
+  // Observed line, clipped to the displayed day.
+  const gaugePts = observedReadings.filter((r) => {
+    const t = r.t.getTime();
+    return t >= day.start && t <= day.end;
+  });
   const gaugeLinePath =
     gaugePts.length > 1
       ? gaugePts
