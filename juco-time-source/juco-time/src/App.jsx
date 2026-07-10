@@ -461,7 +461,7 @@ const RAW = {
   "2027-06-30": [["H","01:48",4.28],["L","08:19",1.67],["H","14:23",4.33],["L","21:02",1.64]],
 };
 
-// Official Admiralty-derived HW/LW table (above). Ends 30 Jun 2026.
+// Official HW/LW table (above), from tidetime.org. Ends 30 Jun 2027.
 const OFFICIAL_EXTREMES = Object.entries(RAW)
   .flatMap(([d, evs]) => evs.map(([type, hm, h]) => ({
     type, h, date: new Date(`${d}T${hm}:00+01:00`),
@@ -471,7 +471,7 @@ const OFFICIAL_LAST = OFFICIAL_EXTREMES[OFFICIAL_EXTREMES.length - 1].date.getTi
 
 /* ---------------------------------------------------------------------
    HARMONIC EXTENSION
-   The official table above runs out on 30 Jun 2026. To keep the planner
+   The official table above runs out on 30 Jun 2027. To keep the planner
    working past that date, we extend it with a harmonic tide model whose
    constituents were fitted by least squares to that same 73-day table
    (19 Apr – 30 Jun 2026). Nine major constituents are the most that a
@@ -565,6 +565,16 @@ const fmtTime = (d) =>
 const fmtDayLong = (d) =>
   d.toLocaleDateString("en-GB", { timeZone: TZ, weekday: "short", day: "numeric", month: "short" });
 const todayISO = () => new Date().toLocaleDateString("en-CA", { timeZone: TZ });
+
+// Human labels for the prediction range, derived so they never go stale when the
+// official table is extended. e.g. "19 Apr 2026", "30 Jun 2027", "Dec 2028".
+const fmtDMY = (ms) =>
+  new Date(ms).toLocaleDateString("en-GB", { timeZone: TZ, day: "numeric", month: "short", year: "numeric" });
+const fmtMY = (ms) =>
+  new Date(ms).toLocaleDateString("en-GB", { timeZone: TZ, month: "short", year: "numeric" });
+const OFFICIAL_FIRST_LABEL = fmtDMY(FIRST);        // start of the official table
+const OFFICIAL_LAST_LABEL = fmtDMY(OFFICIAL_LAST); // end of the official table
+const HARMONIC_END_LABEL = fmtMY(LAST);            // end of the harmonic extension
 
 function isoToDate(iso, hm = "12:00") {
   return new Date(`${iso}T${hm}:00+01:00`);
@@ -1077,9 +1087,10 @@ export default function App() {
 
           {!inRange ? (
             <div style={{ padding: 22, color: C.inkSoft, fontSize: 14 }}>
-              Predictions run from <strong>19 Apr 2026</strong> to about <strong>Dec 2027</strong>
-              {" "}(official table to 30 Jun 2026, harmonic estimate beyond). Today falls outside
-              that range — use the day planner below to look within it.
+              Predictions run from <strong>{OFFICIAL_FIRST_LABEL}</strong> to about{" "}
+              <strong>{HARMONIC_END_LABEL}</strong>{" "}(official table to {OFFICIAL_LAST_LABEL},
+              harmonic estimate beyond). Today falls outside that range — use the day planner
+              below to look within it.
             </div>
           ) : (
             <div style={{ display: "flex", flexWrap: "wrap" }}>
@@ -1697,9 +1708,9 @@ export default function App() {
           <p style={{ fontSize: 12, color: C.inkSoft, lineHeight: 1.55, margin: 0 }}>
             <strong style={{ color: C.ink }}>Predictions only — not for navigation.</strong>{" "}
             Heights are astronomical predictions for Falmouth interpolated with a standard
-            cosine tidal curve between high and low water. Up to <strong>30 Jun 2026</strong> these
+            cosine tidal curve between high and low water. Up to <strong>{OFFICIAL_LAST_LABEL}</strong> these
             come from the published table (tidetime.org); <strong>beyond that date they are a
-            harmonic extrapolation</strong> fitted to that same table (9 constituents), accurate to
+            harmonic extrapolation</strong> (9 constituents fitted to the Apr–Jun 2026 table), accurate to
             roughly 0.1–0.2 m near the boundary and degrading further ahead. Strong wind, low
             barometric pressure or storm surge can raise or lower the real level by 0.3 m or more,
             and slipway depths vary. Always keep your own margin, check the weather, and tell
