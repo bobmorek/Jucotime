@@ -95,11 +95,78 @@ const RAW = {
   "2026-06-30": [["L","00:39",1.14],["H","06:17",4.56],["L","12:46",1.18],["H","18:32",5.01]],
 };
 
-const EXTREMES = Object.entries(RAW)
+// Official Admiralty-derived HW/LW table (above). Ends 30 Jun 2026.
+const OFFICIAL_EXTREMES = Object.entries(RAW)
   .flatMap(([d, evs]) => evs.map(([type, hm, h]) => ({
     type, h, date: new Date(`${d}T${hm}:00+01:00`),
   })))
   .sort((a, b) => a.date - b.date);
+const OFFICIAL_LAST = OFFICIAL_EXTREMES[OFFICIAL_EXTREMES.length - 1].date.getTime();
+
+/* ---------------------------------------------------------------------
+   HARMONIC EXTENSION
+   The official table above runs out on 30 Jun 2026. To keep the planner
+   working past that date, we extend it with a harmonic tide model whose
+   constituents were fitted by least squares to that same 73-day table
+   (19 Apr – 30 Jun 2026). Nine major constituents are the most that a
+   record this short can resolve without the closely-spaced minor lines
+   trading energy and going unphysical.
+   Height h(t) = Z0 + Σ [ Aᵢ·cos(ωᵢ·t) + Bᵢ·sin(ωᵢ·t) ],  t in hours
+   from the epoch. Accuracy vs the source table: ~0.05 m RMS in-window,
+   ~0.1–0.2 m a few weeks out, degrading further ahead; nodal factors are
+   frozen at the fit epoch and there are no seasonal (Sa/Ssa) terms.
+   PREDICTIONS ONLY — not for navigation. Re-fit when a newer table is added.
+   --------------------------------------------------------------------- */
+const TIDE_EPOCH_UTC = 1779667200000; // 2026-05-25T00:00:00Z
+const TIDE_Z0 = 2.91071727;           // mean level above chart datum (m)
+const HARMONIC_CONSTITUENTS = [
+  { name: "M2",  speed: 28.9841042, A:  1.69809981, B: -0.32839945 },
+  { name: "S2",  speed: 30.0000000, A: -0.47447954, B:  0.00998529 },
+  { name: "N2",  speed: 28.4397295, A:  0.12223863, B:  0.20882033 },
+  { name: "K1",  speed: 15.0410686, A:  0.06334105, B: -0.05346634 },
+  { name: "O1",  speed: 13.9430356, A:  0.09876283, B:  0.00667691 },
+  { name: "Q1",  speed: 13.3986609, A:  0.01726545, B:  0.00714124 },
+  { name: "M4",  speed: 57.9682084, A: -0.06227992, B: -0.07658483 },
+  { name: "MS4", speed: 58.9841042, A:  0.01758808, B:  0.12192029 },
+  { name: "M6",  speed: 86.9523127, A: -0.02218421, B:  0.05493699 },
+];
+const DEG2RAD = Math.PI / 180;
+function harmonicHeight(ms) {
+  const t = (ms - TIDE_EPOCH_UTC) / 3600000; // hours from epoch
+  let h = TIDE_Z0;
+  for (const c of HARMONIC_CONSTITUENTS) {
+    const w = c.speed * DEG2RAD;
+    h += c.A * Math.cos(w * t) + c.B * Math.sin(w * t);
+  }
+  return h;
+}
+// Find HW/LW turning points of the harmonic curve between two instants.
+function harmonicExtremes(fromMs, toMs) {
+  const step = 5 * 60000;
+  const slope = (ms) => harmonicHeight(ms + 60000) - harmonicHeight(ms - 60000);
+  const out = [];
+  let prev = slope(fromMs);
+  for (let ms = fromMs + step; ms <= toMs; ms += step) {
+    const cur = slope(ms);
+    if ((prev > 0) !== (cur > 0)) {
+      let lo = ms - step, hi = ms;
+      for (let k = 0; k < 28; k++) {
+        const mid = (lo + hi) / 2;
+        if ((slope(lo) > 0) === (slope(mid) > 0)) lo = mid; else hi = mid;
+      }
+      const tMs = Math.round((lo + hi) / 2 / 60000) * 60000; // to the minute
+      out.push({ type: prev > 0 ? "H" : "L", h: harmonicHeight(tMs), date: new Date(tMs), predicted: true });
+    }
+    prev = cur;
+  }
+  return out;
+}
+
+// Official table, then harmonic-predicted extremes for ~18 months beyond it.
+const EXTREMES = [
+  ...OFFICIAL_EXTREMES,
+  ...harmonicExtremes(OFFICIAL_LAST + 60000, OFFICIAL_LAST + 550 * 24 * 3600 * 1000),
+];
 
 const FIRST = EXTREMES[0].date.getTime();
 const LAST = EXTREMES[EXTREMES.length - 1].date.getTime();
@@ -113,7 +180,7 @@ function heightAt(t) {
   const a = EXTREMES[i], b = EXTREMES[i + 1];
   const frac = (ms - a.date.getTime()) / (b.date.getTime() - a.date.getTime());
   const h = a.h + (b.h - a.h) * (1 - Math.cos(Math.PI * frac)) / 2;
-  return { h, rising: b.h > a.h, prev: a, next: b, frac };
+  return { h, rising: b.h > a.h, prev: a, next: b, frac, predicted: ms > OFFICIAL_LAST };
 }
 
 function nextEvents(t) {
@@ -140,6 +207,13 @@ function shiftISO(iso, days) {
   const d = isoToDate(iso);
   d.setDate(d.getDate() + days);
   return d.toLocaleDateString("en-CA", { timeZone: TZ });
+}
+// A day is plannable if its midday falls within the predictable range — the
+// official table plus the harmonic extension (FIRST … LAST), not just the
+// raw table. Lets the planner default to and navigate real current dates.
+function dayAvailable(iso) {
+  const noon = isoToDate(iso, "12:00").getTime();
+  return noon > FIRST && noon < LAST;
 }
 function durStr(ms) {
   if (ms < 0) ms = 0;
@@ -192,176 +266,73 @@ const FONTS = `
 }
 `;
 
-/* ---------------------------------------------------------------------
-   Live observed-gauge sources + persistence.
+// localStorage key for the accumulated AP observed-tide history.
+const AP_HISTORY_KEY = "juco.apHistory.v1";
 
-   Falmouth's own Docks gauge (via the Port-Log proxy) exposes only ONE live
-   reading per poll, so we remember readings in localStorage and accumulate
-   them into a trace over the window. EA gauges return ~18 h of history, but we
-   persist those too so the observed line survives reloads and keeps filling.
-   --------------------------------------------------------------------- */
-const GAUGES = {
-  Falmouth:  { label: "Falmouth Docks", kind: "portlog", datum: "docks", pollMs: 5 * 60 * 1000 },
-  Newlyn:    { label: "Newlyn",         kind: "ea",      datum: "local", pollMs: 15 * 60 * 1000 },
-  Devonport: { label: "Devonport",      kind: "ea",      datum: "local", pollMs: 15 * 60 * 1000 },
+// Halo behind SVG chart text: paints a cream stroke under the fill so labels
+// stay readable where they cross grid lines, fills and coloured bands.
+const textHalo = {
+  stroke: C.panel,
+  strokeWidth: 3,
+  paintOrder: "stroke",
+  strokeLinejoin: "round",
 };
-const GAUGE_ORDER = ["Falmouth", "Newlyn", "Devonport"];
 
-const OBS_WINDOW_MS = 48 * 3600 * 1000; // keep ~2 days of remembered readings
-const obsKey = (station) => `juco.obs.${station}`;
-
-// Remembered readings for a station as [{t: ms, v}], pruned to the window.
-function loadRemembered(station) {
-  try {
-    const raw = localStorage.getItem(obsKey(station));
-    if (!raw) return [];
-    const cutoff = Date.now() - OBS_WINDOW_MS;
-    return JSON.parse(raw)
-      .filter((r) => r && typeof r.t === "number" && typeof r.v === "number" && !isNaN(r.v) && r.t >= cutoff)
-      .sort((a, b) => a.t - b.t);
-  } catch {
-    return [];
-  }
-}
-
-// Merge incoming [{t: ms, v}] with remembered, dedupe by 1-minute bucket,
-// prune to the window, persist, and return the merged list.
-function remember(station, incoming) {
-  const cutoff = Date.now() - OBS_WINDOW_MS;
-  const map = new Map();
-  const add = (r) => {
-    if (!r || typeof r.v !== "number" || isNaN(r.v) || typeof r.t !== "number" || r.t < cutoff) return;
-    map.set(Math.round(r.t / 60000), { t: r.t, v: r.v });
-  };
-  loadRemembered(station).forEach(add);
-  (incoming || []).forEach(add);
-  const merged = [...map.values()].sort((a, b) => a.t - b.t);
-  try {
-    localStorage.setItem(obsKey(station), JSON.stringify(merged));
-  } catch {
-    /* storage unavailable — degrade to in-memory only */
-  }
-  return merged;
-}
-
-// ms-based readings -> Date-based readings the chart + GaugeView expect.
-const toDated = (rows) => rows.map((r) => ({ t: new Date(r.t), v: r.v }));
-
-// Latest Falmouth Docks reading via our Netlify proxy (one live point per poll).
-async function fetchFalmouth() {
-  const r = await fetch("/api/falmouth-tide", { headers: { accept: "application/json" } });
-  if (!r.ok) throw new Error("proxy " + r.status);
-  const j = await r.json();
-  if (j.error) throw new Error(j.error);
-  if (typeof j.observed !== "number" || isNaN(j.observed)) throw new Error("no observed value");
-  const t = j.time ? new Date(j.time).getTime() : Date.now();
-  return {
-    chosen: { station: { label: GAUGES.Falmouth.label }, datum: "docks" },
-    incoming: [{ t, v: j.observed }],
-    meta: { predicted: j.predicted, surge: j.surge },
-  };
-}
-
-// ~18 h of Environment Agency readings for Newlyn / Devonport.
-async function fetchEA(station) {
-  const sr = await fetch(
-    "https://environment.data.gov.uk/flood-monitoring/id/stations?type=TideGauge&label=" +
-    encodeURIComponent(station)
-  );
-  if (!sr.ok) throw new Error("stations " + sr.status);
-  const sd = await sr.json();
-  const items = sd.items || [];
-  if (!items.length) throw new Error(`no station "${station}"`);
-
-  // Stations come in pairs — one in local chart datum (ends "-m"), one in mAOD.
-  // Prefer local: it matches the chart-datum heights used in tide tables.
-  let chosen = null;
-  for (const s of items) {
-    const ms = s.measures ? (Array.isArray(s.measures) ? s.measures : [s.measures]) : [];
-    for (const m of ms) {
-      if (m && m["@id"] && m["@id"].endsWith("-m")) { chosen = { station: s, measure: m, datum: "local" }; break; }
-    }
-    if (chosen) break;
-  }
-  if (!chosen) {
-    const s = items[0];
-    const ms = s.measures ? (Array.isArray(s.measures) ? s.measures : [s.measures]) : [];
-    if (!ms.length) throw new Error("no measures");
-    chosen = { station: s, measure: ms[0], datum: ms[0]["@id"].endsWith("mAOD") ? "AOD" : "?" };
-  }
-
-  const since = new Date(Date.now() - 18 * 3600 * 1000).toISOString();
-  const measureUrl = chosen.measure["@id"].replace(/^http:/, "https:");
-  const rr = await fetch(`${measureUrl}/readings?since=${encodeURIComponent(since)}&_sorted`);
-  if (!rr.ok) throw new Error("readings " + rr.status);
-  const rd = await rr.json();
-  const incoming = (rd.items || [])
-    .map((r) => ({ t: new Date(r.dateTime).getTime(), v: Number(r.value) }))
-    .filter((r) => !isNaN(r.v) && !isNaN(r.t));
-  return { chosen, incoming, meta: null };
-}
-
-// Committed Falmouth Docks history, scraped by the tide-log GitHub Action.
-// raw.githubusercontent.com serves with `access-control-allow-origin: *`, so the
-// browser can read the daily CSVs directly — the observed line then shows the full
-// server-collected trace for any day, not just what this browser happened to log.
-const DATA_REF = "main"; // branch the tide logger commits to
-const RAW_BASE = `https://raw.githubusercontent.com/bobmorek/Jucotime/${DATA_REF}/data/tide/falmouth-docks`;
-const utcDay = (ms) => new Date(ms).toISOString().slice(0, 10); // YYYY-MM-DD
-
-async function fetchFalmouthHistory(startMs, endMs) {
-  // The visible local day can straddle two UTC date files.
-  const days = [...new Set([utcDay(startMs), utcDay(endMs - 1)])];
-  const rows = [];
-  await Promise.all(
-    days.map(async (d) => {
-      try {
-        const r = await fetch(`${RAW_BASE}/${d.slice(0, 7)}/${d}.csv`, { cache: "no-store" });
-        if (!r.ok) return; // 404 = nothing logged for that day yet
-        const text = await r.text();
-        text.split("\n").slice(1).forEach((line) => {
-          const [t, obs] = line.split(",");
-          const ms = t ? new Date(t).getTime() : NaN;
-          const v = Number(obs);
-          if (!isNaN(ms) && !isNaN(v)) rows.push({ t: ms, v });
-        });
-      } catch {
-        /* offline / transient — fall back to live + remembered readings */
-      }
-    })
-  );
-  return rows.sort((a, b) => a.t - b.t);
-}
+// Shared "small caps" section-label style. Module-level so components defined
+// outside App (e.g. LocalLive) can use it too.
+const label = {
+  fontSize: 11, letterSpacing: "0.13em", textTransform: "uppercase",
+  color: C.inkSoft, fontWeight: 600, fontFamily: "Archivo, sans-serif",
+};
 
 export default function App() {
   const [now, setNow] = useState(() => new Date());
   const [selISO, setSelISO] = useState(() => {
     const t = todayISO();
-    return RAW[t] ? t : "2026-05-14";
+    return dayAvailable(t) ? t : "2026-05-14";
   });
   const [threshold, setThreshold] = useState(1.3);
   const [activeSlip, setActiveSlip] = useState("Grove Place slip");
 
   const [weather, setWeather] = useState(null);
+  const [windHist, setWindHist] = useState(null);
+  const [portlog, setPortlog] = useState(null);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [gaugeStation, setGaugeStation] = useState("Falmouth");
+  const [gaugeStation, setGaugeStation] = useState("Newlyn");
   const [gauge, setGauge] = useState(null);
-  const [hist, setHist] = useState([]); // committed Falmouth history for the selected day
+  // Accumulated AP (Falmouth Docks) observed-tide readings, persisted across
+  // reloads so the day chart builds up a real observed track over the day.
+  const [apHistory, setApHistory] = useState(() => {
+    try {
+      const raw = localStorage.getItem(AP_HISTORY_KEY);
+      const arr = raw ? JSON.parse(raw) : [];
+      return Array.isArray(arr) ? arr.filter((p) => p && typeof p.t === "number" && typeof p.v === "number") : [];
+    } catch { return []; }
+  });
 
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 30000);
     return () => clearInterval(id);
   }, []);
 
-  // ---- committed Falmouth Docks history for the day being viewed ----
+  // Append each fresh AP observed reading to the persisted history (deduped by
+  // its measurement timestamp; kept to the last 36 h).
   useEffect(() => {
-    if (gaugeStation !== "Falmouth") { setHist([]); return; }
-    let cancelled = false;
-    const start = isoToDate(selISO, "00:00").getTime();
-    const end = start + 24 * 3600 * 1000;
-    fetchFalmouthHistory(start, end).then((rows) => { if (!cancelled) setHist(rows); });
-    return () => { cancelled = true; };
-  }, [gaugeStation, selISO, refreshKey]);
+    if (!portlog || portlog.error) return;
+    const d = portlog.docks;
+    if (!d || typeof d.observed !== "number") return;
+    const dt = parsePortlogTime(d.dateTime);
+    const tMs = dt ? dt.getTime() : Date.now();
+    setApHistory((prev) => {
+      if (prev.some((p) => Math.abs(p.t - tMs) < 60000)) return prev;
+      const cutoff = Date.now() - 36 * 3600 * 1000;
+      const next = [...prev, { t: tMs, v: d.observed }]
+        .filter((p) => p.t >= cutoff)
+        .sort((a, b) => a.t - b.t);
+      try { localStorage.setItem(AP_HISTORY_KEY, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }, [portlog]);
 
   // ---- weather forecast (Open-Meteo, no API key, CORS-friendly) ----
   useEffect(() => {
@@ -396,36 +367,118 @@ export default function App() {
     return () => { cancelled = true; clearInterval(id); };
   }, [refreshKey]);
 
-  // ---- live tide gauge (accumulated + remembered across polls) ----
+  // ---- wind speed history (Open-Meteo, previous 24 h hourly, CORS-friendly) ----
   useEffect(() => {
     let cancelled = false;
-    const cfg = GAUGES[gaugeStation] || GAUGES.Newlyn;
-    const placeholder = (extra) => ({
-      chosen: { station: { label: cfg.label }, datum: cfg.datum },
-      readings: toDated(loadRemembered(gaugeStation)),
-      ...extra,
-    });
-
-    // Seed from remembered readings so the observed line doesn't blank out
-    // while the next fetch is in flight.
-    const seeded = placeholder({ stale: true });
-    setGauge(seeded.readings.length ? seeded : null);
-
+    setWindHist(null);
     async function load() {
       try {
-        const { chosen, incoming, meta } =
-          cfg.kind === "portlog" ? await fetchFalmouth() : await fetchEA(gaugeStation);
+        const r = await fetch(
+          "https://api.open-meteo.com/v1/forecast?latitude=50.154&longitude=-5.071" +
+          "&hourly=wind_speed_10m,wind_gusts_10m,wind_direction_10m" +
+          "&wind_speed_unit=kn&timezone=Europe%2FLondon&past_days=1&forecast_days=1"
+        );
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const j = await r.json();
         if (cancelled) return;
-        setGauge({ chosen, readings: toDated(remember(gaugeStation, incoming)), meta });
+        const h = j.hourly || {};
+        const pts = (h.time || []).map((t, i) => ({
+          t: new Date(t),
+          speed: h.wind_speed_10m ? h.wind_speed_10m[i] : null,
+          gust: h.wind_gusts_10m ? h.wind_gusts_10m[i] : null,
+          dir: h.wind_direction_10m ? h.wind_direction_10m[i] : null,
+        })).filter((p) => !isNaN(p.t.getTime()) && p.speed != null);
+        setWindHist({ pts });
       } catch (e) {
-        if (cancelled) return;
-        // Keep any remembered trace visible; annotate with the error.
-        const kept = placeholder({ error: String(e.message || e), stale: true });
-        setGauge(kept.readings.length ? kept : { error: String(e.message || e) });
+        if (!cancelled) setWindHist({ error: String(e.message || e) });
       }
     }
     load();
-    const id = setInterval(load, cfg.pollMs);
+    const id = setInterval(load, 15 * 60 * 1000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [refreshKey]);
+
+  // ---- live local wind + tide (Falmouth port-log, scraped via Netlify fn) ----
+  // Queens Met wind + Docks Tide from apfalmouth.port-log.net. The source has no
+  // CORS headers, so we read it through our own /api/portlog serverless function.
+  useEffect(() => {
+    let cancelled = false;
+    setPortlog(null);
+    async function load() {
+      try {
+        const r = await fetch("/api/portlog");
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const j = await r.json();
+        if (cancelled) return;
+        if (j.error) throw new Error(j.error);
+        setPortlog(j);
+      } catch (e) {
+        if (!cancelled) setPortlog({ error: String(e.message || e) });
+      }
+    }
+    load();
+    const id = setInterval(load, 5 * 60 * 1000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [refreshKey]);
+
+  // ---- live tide gauge (Environment Agency / BODC, 15-min mean sea level) ----
+  useEffect(() => {
+    let cancelled = false;
+    setGauge(null);
+    async function load() {
+      try {
+        // 1. find the station by label
+        const sr = await fetch(
+          "https://environment.data.gov.uk/flood-monitoring/id/stations?type=TideGauge&label=" +
+          encodeURIComponent(gaugeStation)
+        );
+        if (!sr.ok) throw new Error("stations " + sr.status);
+        const sd = await sr.json();
+        const items = sd.items || [];
+        if (!items.length) throw new Error(`no station "${gaugeStation}"`);
+
+        // Stations come in pairs — one with measure in local chart datum (ends "-m"),
+        // one in metres above Ordnance Datum Newlyn (mAOD). Prefer local: it matches
+        // the chart-datum heights used in tide tables.
+        let chosen = null;
+        for (const s of items) {
+          const ms = s.measures ? (Array.isArray(s.measures) ? s.measures : [s.measures]) : [];
+          for (const m of ms) {
+            if (m && m["@id"] && m["@id"].endsWith("-m")) {
+              chosen = { station: s, measure: m, datum: "local" };
+              break;
+            }
+          }
+          if (chosen) break;
+        }
+        if (!chosen) {
+          const s = items[0];
+          const ms = s.measures ? (Array.isArray(s.measures) ? s.measures : [s.measures]) : [];
+          if (!ms.length) throw new Error("no measures");
+          chosen = { station: s, measure: ms[0], datum: ms[0]["@id"].endsWith("mAOD") ? "AOD" : "?" };
+        }
+
+        // 2. fetch the last ~18 hours of readings
+        const since = new Date(Date.now() - 18 * 3600 * 1000).toISOString();
+        const measureUrl = chosen.measure["@id"].replace(/^http:/, "https:");
+        const rr = await fetch(
+          `${measureUrl}/readings?since=${encodeURIComponent(since)}&_sorted`
+        );
+        if (!rr.ok) throw new Error("readings " + rr.status);
+        const rd = await rr.json();
+        const readings = (rd.items || [])
+          .map((r) => ({ t: new Date(r.dateTime), v: Number(r.value) }))
+          .filter((r) => !isNaN(r.v) && !isNaN(r.t.getTime()))
+          .sort((a, b) => a.t - b.t);
+
+        if (cancelled) return;
+        setGauge({ chosen, readings });
+      } catch (e) {
+        if (!cancelled) setGauge({ error: String(e.message || e) });
+      }
+    }
+    load();
+    const id = setInterval(load, 15 * 60 * 1000);
     return () => { cancelled = true; clearInterval(id); };
   }, [gaugeStation]);
 
@@ -486,23 +539,14 @@ export default function App() {
     ? `${linePath} L${xOf(curvePts[curvePts.length - 1].m).toFixed(1)},${yOf(0)} L${xOf(curvePts[0].m).toFixed(1)},${yOf(0)} Z`
     : "";
 
-  // Observed readings = committed history (server-collected) merged with the
-  // live/remembered readings, deduped to the minute.
-  const observedReadings = useMemo(() => {
-    const map = new Map();
-    const add = (t, v) => {
-      if (typeof v === "number" && !isNaN(v)) map.set(Math.round(t / 60000), { t, v });
-    };
-    hist.forEach((r) => add(r.t, r.v));
-    if (gauge && Array.isArray(gauge.readings)) gauge.readings.forEach((r) => add(r.t.getTime(), r.v));
-    return [...map.values()].map((r) => ({ t: new Date(r.t), v: r.v })).sort((a, b) => a.t - b.t);
-  }, [gauge, hist]);
-
-  // Observed line, clipped to the displayed day.
-  const gaugePts = observedReadings.filter((r) => {
-    const t = r.t.getTime();
-    return t >= day.start && t <= day.end;
-  });
+  // Selected-gauge observed line, clipped to the displayed day
+  const gaugePts =
+    gauge && Array.isArray(gauge.readings)
+      ? gauge.readings.filter((r) => {
+          const t = r.t.getTime();
+          return t >= day.start && t <= day.end;
+        })
+      : [];
   const gaugeLinePath =
     gaugePts.length > 1
       ? gaugePts
@@ -516,6 +560,27 @@ export default function App() {
   const isToday = selISO === todayISO();
   const nowM = isToday ? (now.getTime() - day.start) / 60000 : null;
   const showNowMark = nowM !== null && nowM >= 0 && nowM <= 1440;
+
+  // live AP (Falmouth Docks) observed tide height, plotted on the day chart at "now"
+  const apObserved =
+    portlog && portlog.docks && typeof portlog.docks.observed === "number"
+      ? portlog.docks.observed
+      : null;
+
+  // Accumulated AP observed track, clipped to the displayed day → purple dotted line.
+  const apTrackPts = apHistory
+    .map((p) => ({ t: p.t, v: p.v }))
+    .filter((p) => p.t >= day.start && p.t <= day.end)
+    .sort((a, b) => a.t - b.t);
+  const apTrackPath =
+    apTrackPts.length > 1
+      ? apTrackPts
+          .map((p, i) => {
+            const m = (p.t - day.start) / 60000;
+            return `${i === 0 ? "M" : "L"}${xOf(m).toFixed(1)},${yOf(p.v).toFixed(1)}`;
+          })
+          .join(" ")
+      : "";
 
   // current launch status (live)
   const liveLaunch = inRange ? live.h >= threshold : null;
@@ -539,10 +604,6 @@ export default function App() {
   const card = {
     background: C.panel, border: `1px solid ${C.line}`, borderRadius: 14,
     padding: 18, boxShadow: "0 1px 0 rgba(255,255,255,0.6) inset, 0 6px 18px rgba(27,43,61,0.07)",
-  };
-  const label = {
-    fontSize: 11, letterSpacing: "0.13em", textTransform: "uppercase",
-    color: C.inkSoft, fontWeight: 600, fontFamily: "Archivo, sans-serif",
   };
 
   return (
@@ -597,9 +658,9 @@ export default function App() {
 
           {!inRange ? (
             <div style={{ padding: 22, color: C.inkSoft, fontSize: 14 }}>
-              The built-in tide table covers <strong>19 Apr – 30 Jun 2026</strong>. Today
-              falls outside that range — use the day planner below to look within it, or
-              refresh the dataset for current dates.
+              Predictions run from <strong>19 Apr 2026</strong> to about <strong>Dec 2027</strong>
+              {" "}(official table to 30 Jun 2026, harmonic estimate beyond). Today falls outside
+              that range — use the day planner below to look within it.
             </div>
           ) : (
             <div style={{ display: "flex", flexWrap: "wrap" }}>
@@ -616,6 +677,11 @@ export default function App() {
                   }}>{live.h.toFixed(2)}</span>
                   <span style={{ fontSize: 20, color: C.inkSoft, paddingBottom: 8 }}>m</span>
                 </div>
+                {live.predicted && (
+                  <div style={{ marginTop: 4, fontSize: 11, color: C.inkSoft, fontStyle: "italic" }}>
+                    harmonic estimate (beyond published table)
+                  </div>
+                )}
                 <div style={{
                   marginTop: 8, fontSize: 14, fontWeight: 600,
                   color: live.rising ? C.sea : C.wait,
@@ -738,8 +804,8 @@ export default function App() {
               )}
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <button onClick={() => setSelISO(shiftISO(selISO, -1))} disabled={!RAW[shiftISO(selISO, -1)]}
-                style={navBtn(RAW[shiftISO(selISO, -1)])}>‹</button>
+              <button onClick={() => setSelISO(shiftISO(selISO, -1))} disabled={!dayAvailable(shiftISO(selISO, -1))}
+                style={navBtn(dayAvailable(shiftISO(selISO, -1)))}>‹</button>
               <span style={{
                 fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 18, minWidth: 132, textAlign: "center",
               }}>
@@ -747,9 +813,13 @@ export default function App() {
                 {selISO === todayISO() && (
                   <span style={{ color: C.red, fontSize: 12, fontFamily: "Archivo", marginLeft: 6 }}>TODAY</span>
                 )}
+                {isoToDate(selISO, "12:00").getTime() > OFFICIAL_LAST && (
+                  <span title="Harmonic estimate — beyond the official table (to 30 Jun 2026)"
+                    style={{ color: C.wait, fontSize: 11, fontWeight: 700, fontFamily: "Archivo", marginLeft: 6 }}>≈ EST</span>
+                )}
               </span>
-              <button onClick={() => setSelISO(shiftISO(selISO, 1))} disabled={!RAW[shiftISO(selISO, 1)]}
-                style={navBtn(RAW[shiftISO(selISO, 1)])}>›</button>
+              <button onClick={() => setSelISO(shiftISO(selISO, 1))} disabled={!dayAvailable(shiftISO(selISO, 1))}
+                style={navBtn(dayAvailable(shiftISO(selISO, 1)))}>›</button>
             </div>
           </div>
 
@@ -760,6 +830,7 @@ export default function App() {
           }}>
             <LegendItem color={C.seaDeep} label="Falmouth prediction" />
             {gaugeLinePath && <LegendItem color="#c47150" label={`${gaugeStation} observed`} dashed />}
+            {(apTrackPath || (showNowMark && apObserved != null)) && <LegendItem color="#6d4ca8" label="AP observed" dashed />}
             <LegendItem color={C.go} label="launch limit" />
             <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
               <span style={{
@@ -778,7 +849,7 @@ export default function App() {
                 <g key={"h" + h}>
                   <line x1={PL} x2={W - PR} y1={yOf(h)} y2={yOf(h)}
                     stroke={C.lineSoft} strokeWidth={1} />
-                  <text x={PL - 6} y={yOf(h) + 3} textAnchor="end"
+                  <text {...textHalo} x={PL - 6} y={yOf(h) + 3} textAnchor="end"
                     fontSize={10} fill={C.inkSoft} fontFamily="'Spline Sans Mono', monospace">{h}</text>
                 </g>
               ))}
@@ -787,7 +858,7 @@ export default function App() {
                 <g key={"v" + hr}>
                   <line x1={xOf(hr * 60)} x2={xOf(hr * 60)} y1={PT} y2={PT + plotH}
                     stroke={C.lineSoft} strokeWidth={1} />
-                  <text x={xOf(hr * 60)} y={H - 10} textAnchor="middle"
+                  <text {...textHalo} x={xOf(hr * 60)} y={H - 10} textAnchor="middle"
                     fontSize={10} fill={C.inkSoft} fontFamily="'Spline Sans Mono', monospace">
                     {String(hr).padStart(2, "0")}
                   </text>
@@ -802,24 +873,16 @@ export default function App() {
               {/* tide curve (Falmouth prediction) */}
               {areaPath && <path d={areaPath} fill={C.seaFill} />}
               {linePath && <path d={linePath} fill="none" stroke={C.seaDeep} strokeWidth={2.4} />}
-              {/* observed gauge line (overlaid on prediction) */}
+              {/* Newlyn/Devonport observed (overlaid on prediction) */}
               {gaugeLinePath && (
                 <path d={gaugeLinePath} fill="none" stroke="#c47150"
                   strokeWidth={1.9} strokeDasharray="5 3"
                   strokeLinecap="round" strokeLinejoin="round" />
               )}
-              {/* single remembered point before a trace has built up */}
-              {gaugePts.length === 1 && (
-                <circle
-                  cx={xOf((gaugePts[0].t.getTime() - day.start) / 60000)}
-                  cy={yOf(gaugePts[0].v)}
-                  r={3.5} fill="#c47150" stroke="#fff" strokeWidth={1.2}
-                />
-              )}
               {/* threshold line — drawn on top of curve so it stays visible */}
               <line x1={PL} x2={W - PR} y1={yOf(threshold)} y2={yOf(threshold)}
                 stroke={C.go} strokeWidth={2.4} />
-              <text x={W - PR - 4} y={yOf(threshold) - 5} textAnchor="end"
+              <text {...textHalo} x={W - PR - 4} y={yOf(threshold) - 5} textAnchor="end"
                 fontSize={11} fill={C.go} fontWeight={700} fontFamily="Archivo">
                 launch limit · {threshold.toFixed(1)} m
               </text>
@@ -831,7 +894,7 @@ export default function App() {
                   <g key={"e" + i}>
                     <circle cx={xOf(m)} cy={yOf(e.h)} r={4} fill={high ? C.sea : C.wait}
                       stroke="#fff" strokeWidth={1.5} />
-                    <text x={xOf(m)} y={yOf(e.h) + (high ? -10 : 18)} textAnchor="middle"
+                    <text {...textHalo} x={xOf(m)} y={yOf(e.h) + (high ? -10 : 18)} textAnchor="middle"
                       fontSize={10.5} fontWeight={700} fill={high ? C.sea : C.wait}
                       fontFamily="Archivo">
                       {high ? "HW " : "LW "}{fmtTime(e.date)}
@@ -848,8 +911,27 @@ export default function App() {
                     <circle cx={xOf(nowM)} cy={yOf(live.h)} r={5} fill={C.red}
                       stroke="#fff" strokeWidth={2} />
                   )}
-                  <text x={xOf(nowM)} y={PT - 4} textAnchor="middle"
+                  <text {...textHalo} x={xOf(nowM)} y={PT - 4} textAnchor="middle"
                     fontSize={10} fontWeight={700} fill={C.red} fontFamily="Archivo">NOW</text>
+                </g>
+              )}
+              {/* live AP (Falmouth Docks) observed height at now */}
+              {/* purple dotted track of accumulated AP observed heights */}
+              {apTrackPath && (
+                <path d={apTrackPath} fill="none" stroke="#6d4ca8" strokeWidth={1.8}
+                  strokeDasharray="2 4" strokeLinecap="round" strokeLinejoin="round" />
+              )}
+              {showNowMark && apObserved != null && (
+                <g>
+                  <rect
+                    x={xOf(nowM) - 4.5} y={yOf(apObserved) - 4.5}
+                    width={9} height={9} fill="#6d4ca8" stroke="#fff" strokeWidth={1.6}
+                    transform={`rotate(45 ${xOf(nowM)} ${yOf(apObserved)})`}
+                  />
+                  <text {...textHalo} x={xOf(nowM) + 8} y={yOf(apObserved) + 3} textAnchor="start"
+                    fontSize={10.5} fontWeight={700} fill="#6d4ca8" fontFamily="Archivo">
+                    AP {apObserved.toFixed(2)} m
+                  </text>
                 </g>
               )}
             </svg>
@@ -1054,25 +1136,95 @@ export default function App() {
           </div>
         </section>
 
-        {/* ---------- LIVE TIDE GAUGE (Falmouth Docks / Port-Log · EA fallback) ---------- */}
+        {/* ---------- LIVE LOCAL (Falmouth port-log: Queens wind + Docks tide) ---------- */}
+        <section style={{ ...card, marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+            <span style={label}>Live local · Falmouth Docks</span>
+            <a
+              href="https://apfalmouth.port-log.net/live/Display.php"
+              target="_blank" rel="noopener noreferrer"
+              style={{
+                fontSize: 11, color: C.seaDeep, fontWeight: 700,
+                letterSpacing: "0.05em", textDecoration: "none",
+                fontFamily: "'Spline Sans Mono', monospace",
+              }}>
+              PORT-LOG ↗
+            </a>
+          </div>
+          {portlog === null ? (
+            <p style={{ fontSize: 13, color: C.inkSoft, margin: "12px 0 0" }}>
+              Loading live local readings…
+            </p>
+          ) : portlog.error ? (
+            <p style={{ fontSize: 13, color: C.danger, margin: "12px 0 0" }}>
+              Live local data unavailable right now ({portlog.error}). Tap refresh to retry.
+            </p>
+          ) : (
+            <LocalLive data={portlog} now={now} />
+          )}
+        </section>
+
+        {/* ---------- WIND SPEED · LAST 24 HOURS ---------- */}
+        <section style={{ ...card, marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 6 }}>
+            <span style={label}>Wind speed · last 24 hours</span>
+            <button onClick={() => setRefreshKey((k) => k + 1)}
+              disabled={windHist === null}
+              style={{
+                cursor: windHist === null ? "wait" : "pointer",
+                fontFamily: "'Spline Sans Mono', monospace", fontSize: 11,
+                fontWeight: 600, letterSpacing: "0.05em",
+                padding: "5px 10px", borderRadius: 7,
+                border: `1px solid ${C.line}`, background: C.panel2,
+                color: windHist === null ? C.inkSoft : C.seaDeep,
+              }}>
+              ↻ REFRESH
+            </button>
+          </div>
+          {windHist === null ? (
+            <p style={{ fontSize: 13, color: C.inkSoft, margin: "12px 0 0" }}>
+              Loading wind history…
+            </p>
+          ) : windHist.error ? (
+            <p style={{ fontSize: 13, color: C.danger, margin: "12px 0 0" }}>
+              Wind history unavailable right now ({windHist.error}). Tap refresh to retry.
+            </p>
+          ) : (
+            <WindChart
+              pts={windHist.pts}
+              now={now}
+              live={
+                portlog && portlog.queens && typeof portlog.queens.windSpeed === "number"
+                  ? portlog.queens
+                  : null
+              }
+            />
+          )}
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", fontSize: 11, color: C.inkSoft, marginTop: 12, paddingTop: 10, borderTop: `1px solid ${C.lineSoft}` }}>
+            <LegendItem color={C.seaDeep} label="mean wind" />
+            <LegendItem color={C.inkSoft} label="gusts" dashed />
+            <span>↑ arrows point where the wind blows to</span>
+            <span style={{ marginLeft: "auto" }}>Queens live · Open-Meteo history</span>
+          </div>
+        </section>
+
+        {/* ---------- LIVE TIDE GAUGE (Environment Agency / BODC) ---------- */}
         <section style={{ ...card, marginBottom: 16 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
             <span style={label}>Live tide gauge · {gaugeStation}</span>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <a
-                href={gaugeStation === "Falmouth"
-                  ? "https://apfalmouth.port-log.net/live/Display.php"
-                  : `https://ntslf.org/tides/uk-network/realtime?port=${gaugeStation === "Devonport" ? "Plymouth" : gaugeStation}`}
+                href={`https://ntslf.org/tides/uk-network/realtime?port=${gaugeStation === "Devonport" ? "Plymouth" : gaugeStation}`}
                 target="_blank" rel="noopener noreferrer"
                 style={{
                   fontSize: 11, color: C.seaDeep, fontWeight: 700,
                   letterSpacing: "0.05em", textDecoration: "none",
                   fontFamily: "'Spline Sans Mono', monospace",
                 }}>
-                {gaugeStation === "Falmouth" ? "PORT-LOG LIVE ↗" : "NTSLF LIVE ↗"}
+                NTSLF LIVE ↗
               </a>
               <div style={{ display: "flex", gap: 4 }}>
-              {GAUGE_ORDER.map((n) => {
+              {["Newlyn", "Devonport"].map((n) => {
                 const on = gaugeStation === n;
                 return (
                   <button key={n} onClick={() => setGaugeStation(n)}
@@ -1096,44 +1248,24 @@ export default function App() {
             <p style={{ fontSize: 13, color: C.inkSoft, margin: "12px 0 0" }}>
               Loading observed sea level…
             </p>
-          ) : gauge.error && !(gauge.readings && gauge.readings.length) ? (
+          ) : gauge.error ? (
             <p style={{ fontSize: 13, color: C.danger, margin: "12px 0 0", lineHeight: 1.5 }}>
               Gauge data unavailable ({gauge.error}).
             </p>
-          ) : !gauge.readings || gauge.readings.length === 0 ? (
-            <p style={{ fontSize: 13, color: C.inkSoft, margin: "12px 0 0" }}>
-              No readings yet — the trace builds as data arrives.
+          ) : gauge.readings.length === 0 ? (
+            <p style={{ fontSize: 13, color: C.danger, margin: "12px 0 0" }}>
+              No recent readings available — gauge may be offline.
             </p>
           ) : (
-            <>
-              {gauge.error && (
-                <p style={{ fontSize: 12, color: C.danger, margin: "12px 0 0" }}>
-                  Live fetch failed ({gauge.error}) — showing remembered readings.
-                </p>
-              )}
-              <GaugeView data={gauge} />
-              {gauge.meta && typeof gauge.meta.surge === "number" && (
-                <div style={{ fontSize: 12, color: C.inkSoft, marginTop: 8 }}>
-                  Predicted{" "}
-                  <strong style={{ color: C.ink }}>{gauge.meta.predicted.toFixed(2)} m</strong>
-                  {" · "}surge{" "}
-                  <strong style={{ color: gauge.meta.surge >= 0 ? C.sea : C.wait }}>
-                    {gauge.meta.surge >= 0 ? "+" : ""}{gauge.meta.surge.toFixed(2)} m
-                  </strong>
-                </div>
-              )}
-            </>
+            <GaugeView data={gauge} />
           )}
 
           <p style={{ fontSize: 11, color: C.inkSoft, margin: "14px 0 0", lineHeight: 1.55, paddingTop: 10, borderTop: `1px solid ${C.lineSoft}` }}>
-<strong>Falmouth Docks</strong> is the town's own harbour gauge, via{" "}
-            <a href="https://apfalmouth.port-log.net/live/Display.php" target="_blank" rel="noopener noreferrer" style={{ color: C.seaDeep, fontWeight: 600, textDecoration: "underline" }}>Port-Log</a>{" "}
-            (OceanWise). It publishes one live reading at a time, so the observed trace is
-            built up and remembered as readings arrive.{" "}
-            <strong>Newlyn</strong> (~30 km SW) and <strong>Devonport</strong> (~70 km E)
-            are the national Environment Agency gauges — Newlyn matches Falmouth's timing
-            and range closely, Devonport is the standard port Falmouth predictions derive
-            from · EA readings archived by <a href="https://www.bodc.ac.uk/data/hosted_data_systems/sea_level/uk_tide_gauge_network/" target="_blank" rel="noopener noreferrer" style={{ color: C.seaDeep, fontWeight: 600, textDecoration: "underline" }}>BODC</a>.
+            Falmouth has no national tide gauge of its own. <strong>Newlyn</strong> (~30 km SW)
+            is the nearest — almost identical timing and range to Falmouth.{" "}
+            <strong>Devonport</strong> (~70 km E, in Plymouth) is the standard port
+            from which Falmouth predictions are derived. Data: Environment Agency
+            real-time flood-monitoring API · 15-minute means · archived by <a href="https://www.bodc.ac.uk/data/hosted_data_systems/sea_level/uk_tide_gauge_network/" target="_blank" rel="noopener noreferrer" style={{ color: C.seaDeep, fontWeight: 600, textDecoration: "underline" }}>BODC</a>.
           </p>
         </section>
 
@@ -1146,11 +1278,13 @@ export default function App() {
           <p style={{ fontSize: 12, color: C.inkSoft, lineHeight: 1.55, margin: 0 }}>
             <strong style={{ color: C.ink }}>Predictions only — not for navigation.</strong>{" "}
             Heights are astronomical predictions for Falmouth interpolated with a standard
-            cosine tidal curve between high and low water. Strong wind, low barometric
-            pressure or storm surge can raise or lower the real level by 0.3 m or more, and
-            slipway depths vary. Always keep your own margin, check the weather, and tell
-            someone your plan. Tide data: tidetime.org · Photo heights derived from each
-            image's capture time.
+            cosine tidal curve between high and low water. Up to <strong>30 Jun 2026</strong> these
+            come from the published table (tidetime.org); <strong>beyond that date they are a
+            harmonic extrapolation</strong> fitted to that same table (9 constituents), accurate to
+            roughly 0.1–0.2 m near the boundary and degrading further ahead. Strong wind, low
+            barometric pressure or storm surge can raise or lower the real level by 0.3 m or more,
+            and slipway depths vary. Always keep your own margin, check the weather, and tell
+            someone your plan. Photo heights derived from each image's capture time.
           </p>
         </section>
 
@@ -1158,7 +1292,7 @@ export default function App() {
           textAlign: "center", fontSize: 11, color: C.inkSoft, marginTop: 20,
           fontFamily: "'Spline Sans Mono', monospace",
         }}>
-          JUCO TIME · FALMOUTH HARBOUR · DATA 19 APR – 30 JUN 2026
+          JUCO TIME · FALMOUTH HARBOUR · A BOOM PRODUCTION
         </p>
       </div>
     </div>
@@ -1223,6 +1357,16 @@ function compass8(deg) {
 function windColor(kn) {
   return kn < 11 ? C.go : kn < 17 ? C.wait : C.danger;
 }
+// Compass text (e.g. "WSW") -> degrees the wind comes FROM, for WindArrow.
+const COMPASS_DEG = {
+  N: 0, NNE: 22.5, NE: 45, ENE: 67.5, E: 90, ESE: 112.5, SE: 135, SSE: 157.5,
+  S: 180, SSW: 202.5, SW: 225, WSW: 247.5, W: 270, WNW: 292.5, NW: 315, NNW: 337.5,
+};
+function compassToDeg(txt) {
+  if (txt == null) return null;
+  const d = COMPASS_DEG[String(txt).trim().toUpperCase()];
+  return d == null ? null : d;
+}
 
 function WIcon({ code, size = 30 }) {
   const stroke = 1.7;
@@ -1250,6 +1394,20 @@ function WindArrow({ dir, color = C.seaDeep, size = 18 }) {
     }}>
       <Navigation size={size} strokeWidth={2} color={color} fill={color} />
     </span>
+  );
+}
+
+// SVG wind-direction arrow for use inside <svg> charts. Points where the wind
+// is going (downwind), matching WindArrow: 0° = from north = arrow points down.
+function SvgWindArrow({ x, y, dir, color = C.seaDeep, size = 5 }) {
+  if (dir == null) return null;
+  const s = size;
+  return (
+    <g transform={`translate(${x} ${y}) rotate(${((dir + 180) % 360)})`}>
+      <line x1={0} y1={s} x2={0} y2={-s} stroke={color} strokeWidth={1.6} strokeLinecap="round" />
+      <path d={`M0,${-s - 1} L${-s * 0.6},${-s + 2} M0,${-s - 1} L${s * 0.6},${-s + 2}`}
+        stroke={color} strokeWidth={1.6} fill="none" strokeLinecap="round" strokeLinejoin="round" />
+    </g>
   );
 }
 
@@ -1282,7 +1440,6 @@ function GaugeView({ data }) {
 
   const datumLabel =
     chosen.datum === "local" ? "m above chart datum"
-    : chosen.datum === "docks" ? "m (Docks gauge)"
     : chosen.datum === "AOD" ? "mAOD"
     : "m";
 
@@ -1356,6 +1513,246 @@ function WCell({ cell }) {
       </div>
       <div style={{ fontSize: 10, color: C.inkSoft, letterSpacing: "0.07em", fontWeight: 600 }}>
         {compass8(cell.windDir)}
+      </div>
+    </div>
+  );
+}
+
+// Parse the port-log "YYYY-MM-DD HH:MM:SS UTC" timestamps into a Date.
+function parsePortlogTime(s) {
+  if (!s) return null;
+  const d = new Date(String(s).trim().replace(" ", "T").replace(/\s*UTC$/, "Z"));
+  return isNaN(d.getTime()) ? null : d;
+}
+
+// Live local readings scraped from Falmouth port-log: Queens wind + Docks tide.
+function LocalLive({ data, now }) {
+  const { queens, docks } = data;
+  const nowMs = now ? now.getTime() : Date.now();
+  const stat = {
+    flex: "1 1 240px", minWidth: 220,
+    background: C.panel2, border: `1px solid ${C.lineSoft}`,
+    borderRadius: 10, padding: "12px 14px",
+  };
+  const ago = (s) => {
+    const d = parsePortlogTime(s);
+    return d ? `${durStr(nowMs - d.getTime())} ago` : null;
+  };
+
+  const windKn = queens && typeof queens.windSpeed === "number" ? queens.windSpeed : null;
+  const wc = windKn != null ? windColor(windKn) : C.inkSoft;
+  const windDeg = queens ? compassToDeg(queens.windDir) : null;
+  const surge = docks && typeof docks.surge === "number" ? docks.surge : null;
+
+  return (
+    <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 12 }}>
+      {/* Queens wind */}
+      <div style={stat}>
+        <div style={{ ...label, marginBottom: 8 }}>Queens — wind</div>
+        {queens && windKn != null ? (
+          <>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              {windDeg != null && <WindArrow dir={windDeg} color={wc} size={24} />}
+              <div style={{
+                fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 44,
+                lineHeight: 0.95, color: wc,
+              }}>
+                {Math.round(windKn)}
+                <span style={{ fontSize: 15, color: C.inkSoft, fontWeight: 500 }}> kn</span>
+              </div>
+              <div style={{ fontSize: 13, color: C.inkSoft, fontWeight: 600 }}>
+                from {queens.windDir}
+              </div>
+            </div>
+            <div style={{ fontSize: 12, color: C.inkSoft, marginTop: 6 }}>
+              {typeof queens.gustSpeed === "number"
+                ? <>gusting <strong style={{ color: windColor(queens.gustSpeed) }}>{Math.round(queens.gustSpeed)} kn</strong>
+                    {queens.gustDir ? ` ${queens.gustDir}` : ""}</>
+                : "gust n/a"}
+            </div>
+            {ago(queens.dateTime) && (
+              <div style={{ fontSize: 11, color: C.inkSoft, marginTop: 4 }}>
+                measured {ago(queens.dateTime)}
+              </div>
+            )}
+          </>
+        ) : (
+          <div style={{ fontSize: 13, color: C.inkSoft }}>no wind reading</div>
+        )}
+      </div>
+
+      {/* Docks tide */}
+      <div style={stat}>
+        <div style={{ ...label, marginBottom: 8 }}>Docks — tide</div>
+        {docks && typeof docks.observed === "number" ? (
+          <>
+            <div style={{
+              fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 44,
+              lineHeight: 0.95, color: C.seaDeep,
+            }}>
+              {docks.observed.toFixed(2)}
+              <span style={{ fontSize: 15, color: C.inkSoft, fontWeight: 500 }}> m</span>
+            </div>
+            <div style={{ fontSize: 12, color: C.inkSoft, marginTop: 6 }}>
+              observed · predicted{" "}
+              <strong style={{ color: C.ink }}>
+                {typeof docks.predicted === "number" ? docks.predicted.toFixed(2) : "—"} m
+              </strong>
+            </div>
+            {surge != null && (
+              <div style={{ fontSize: 12, marginTop: 4 }}>
+                surge{" "}
+                <strong style={{ color: surge >= 0 ? C.sea : C.wait }}>
+                  {surge >= 0 ? "+" : ""}{surge.toFixed(2)} m
+                </strong>
+                <span style={{ color: C.inkSoft }}> {surge >= 0 ? "above" : "below"} prediction</span>
+              </div>
+            )}
+            {ago(docks.dateTime) && (
+              <div style={{ fontSize: 11, color: C.inkSoft, marginTop: 4 }}>
+                measured {ago(docks.dateTime)}
+              </div>
+            )}
+          </>
+        ) : (
+          <div style={{ fontSize: 13, color: C.inkSoft }}>no tide reading</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Wind speed over the previous 24 hours (Open-Meteo hourly), with the live
+// Queens reading from port-log marked at "now".
+function WindChart({ pts, now, live }) {
+  const W = 760, H = 220, PL = 30, PR = 14, PT = 14, PB = 26;
+  const plotW = W - PL - PR, plotH = H - PT - PB;
+  const windowMs = 24 * 3600 * 1000;
+  const toMs = now ? now.getTime() : Date.now();
+  const fromMs = toMs - windowMs;
+
+  // hourly points inside the 24 h window
+  const inWin = (pts || []).filter(
+    (p) => p.t.getTime() >= fromMs - 3600000 && p.t.getTime() <= toMs
+  );
+  const liveKn = live && typeof live.windSpeed === "number" ? live.windSpeed : null;
+
+  if (inWin.length < 2 && liveKn == null) {
+    return (
+      <p style={{ fontSize: 13, color: C.inkSoft, margin: "12px 0 0" }}>
+        Not enough wind history to plot yet.
+      </p>
+    );
+  }
+
+  // y-scale: cover speeds + gusts (and live), at least 20 kn, rounded up to 5
+  const all = [];
+  inWin.forEach((p) => { if (p.speed != null) all.push(p.speed); if (p.gust != null) all.push(p.gust); });
+  if (liveKn != null) all.push(liveKn);
+  if (live && typeof live.gustSpeed === "number") all.push(live.gustSpeed);
+  const yMax = Math.max(20, Math.ceil((all.length ? Math.max(...all) : 20) / 5) * 5);
+
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const xOf = (ms) => PL + (clamp(ms, fromMs, toMs) - fromMs) / windowMs * plotW;
+  const yOf = (v) => PT + plotH - (clamp(v, 0, yMax) / yMax) * plotH;
+
+  // mean-wind vertices (append live point at "now" so the line reaches the present)
+  const meanVerts = inWin.filter((p) => p.speed != null).map((p) => ({ ms: p.t.getTime(), v: p.speed }));
+  if (liveKn != null) meanVerts.push({ ms: toMs, v: liveKn });
+  const meanPath = meanVerts.map((d, i) => `${i === 0 ? "M" : "L"}${xOf(d.ms).toFixed(1)},${yOf(d.v).toFixed(1)}`).join(" ");
+  const areaPath = meanVerts.length
+    ? `${meanPath} L${xOf(meanVerts[meanVerts.length - 1].ms).toFixed(1)},${yOf(0)} L${xOf(meanVerts[0].ms).toFixed(1)},${yOf(0)} Z`
+    : "";
+
+  const gustVerts = inWin.filter((p) => p.gust != null).map((p) => ({ ms: p.t.getTime(), v: p.gust }));
+  const gustPath = gustVerts.map((d, i) => `${i === 0 ? "M" : "L"}${xOf(d.ms).toFixed(1)},${yOf(d.v).toFixed(1)}`).join(" ");
+
+  // calm / caution / rough background bands (match the forecast colour bands)
+  const band = (lo, hi, fill) => {
+    if (hi <= 0 || lo >= yMax) return null;
+    const y = yOf(Math.min(hi, yMax));
+    const h = yOf(Math.max(lo, 0)) - y;
+    return <rect x={PL} y={y} width={plotW} height={h} fill={fill} />;
+  };
+
+  // x-axis ticks every 6 h
+  const ticks = [0, 6, 12, 18, 24].map((hr) => fromMs + hr * 3600000);
+  const liveDeg = live ? compassToDeg(live.windDir) : null;
+
+  // direction arrows along the top, sampled every ~3 h
+  const arrowRowY = PT + 7;
+  const arrowPts = inWin
+    .filter((p) => p.dir != null && p.t.getTime() >= fromMs)
+    .filter((_, i) => i % 3 === 0);
+
+  return (
+    <div style={{ marginTop: 12 }}>
+      {liveKn != null && (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+          {liveDeg != null && <WindArrow dir={liveDeg} color={windColor(liveKn)} size={22} />}
+          <span style={{
+            fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 34,
+            lineHeight: 1, color: windColor(liveKn),
+          }}>
+            {Math.round(liveKn)}<span style={{ fontSize: 13, color: C.inkSoft, fontWeight: 500 }}> kn now</span>
+          </span>
+          <span style={{ fontSize: 12, color: C.inkSoft }}>
+            Queens · from {live.windDir}
+            {typeof live.gustSpeed === "number" ? ` · gust ${Math.round(live.gustSpeed)} kn` : ""}
+          </span>
+        </div>
+      )}
+      <div style={{ width: "100%", overflowX: "auto" }}>
+        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", minWidth: 480, display: "block" }}>
+          {band(0, 11, "rgba(47,125,82,0.10)")}
+          {band(11, 17, "rgba(176,125,34,0.10)")}
+          {band(17, yMax, "rgba(169,63,48,0.10)")}
+          {/* y grid + labels every 5 kn */}
+          {Array.from({ length: yMax / 5 + 1 }, (_, k) => {
+            const v = k * 5;
+            return (
+              <g key={"y" + v}>
+                <line x1={PL} x2={W - PR} y1={yOf(v)} y2={yOf(v)} stroke={C.lineSoft} strokeWidth={1} />
+                <text {...textHalo} x={PL - 5} y={yOf(v) + 3} textAnchor="end" fontSize={10} fill={C.inkSoft}
+                  fontFamily="'Spline Sans Mono', monospace">{v}</text>
+              </g>
+            );
+          })}
+          {/* x ticks */}
+          {ticks.map((ms, i) => (
+            <g key={"x" + i}>
+              <line x1={xOf(ms)} x2={xOf(ms)} y1={PT} y2={PT + plotH} stroke={C.lineSoft} strokeWidth={1} />
+              <text {...textHalo} x={xOf(ms)} y={H - 9} textAnchor="middle" fontSize={10} fill={C.inkSoft}
+                fontFamily="'Spline Sans Mono', monospace">
+                {i === ticks.length - 1 ? "now" : fmtTime(new Date(ms))}
+              </text>
+            </g>
+          ))}
+          {/* gusts */}
+          {gustPath && (
+            <path d={gustPath} fill="none" stroke={C.inkSoft} strokeWidth={1.5}
+              strokeDasharray="4 3" strokeLinecap="round" strokeLinejoin="round" opacity={0.8} />
+          )}
+          {/* mean wind */}
+          {areaPath && <path d={areaPath} fill={C.seaFill} />}
+          {meanPath && <path d={meanPath} fill="none" stroke={C.seaDeep} strokeWidth={2.2}
+            strokeLinecap="round" strokeLinejoin="round" />}
+          {/* wind-direction arrows along the top */}
+          {arrowPts.map((p, i) => (
+            <SvgWindArrow key={"a" + i} x={xOf(p.t.getTime())} y={arrowRowY}
+              dir={p.dir} color={windColor(p.speed)} size={5} />
+          ))}
+          {liveDeg != null && (
+            <SvgWindArrow x={xOf(toMs)} y={arrowRowY} dir={liveDeg} color={C.red} size={5.5} />
+          )}
+          {/* live Queens point at now */}
+          {liveKn != null && (
+            <g>
+              <line x1={xOf(toMs)} x2={xOf(toMs)} y1={PT} y2={PT + plotH} stroke={C.red} strokeWidth={1.3} />
+              <circle cx={xOf(toMs)} cy={yOf(liveKn)} r={4.5} fill={C.red} stroke="#fff" strokeWidth={1.8} />
+            </g>
+          )}
+        </svg>
       </div>
     </div>
   );
