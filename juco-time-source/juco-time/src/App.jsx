@@ -269,6 +269,39 @@ const FONTS = `
 // localStorage key for the accumulated AP observed-tide history.
 const AP_HISTORY_KEY = "juco.apHistory.v1";
 
+// Durable AP (Falmouth Docks) history, git-scraped by the tide-log Action and
+// committed to the repo. apHistory (localStorage) only spans ~36 h on this one
+// browser; these committed CSVs give the purple observed track its full trace
+// for any day — including past days — read straight from raw.githubusercontent
+// (which sends `access-control-allow-origin: *`, so the browser can fetch them).
+const DATA_REF = "main"; // branch the tide logger commits to
+const RAW_BASE = `https://raw.githubusercontent.com/bobmorek/Jucotime/${DATA_REF}/data/tide/falmouth-docks`;
+const utcDay = (ms) => new Date(ms).toISOString().slice(0, 10); // YYYY-MM-DD
+
+async function fetchFalmouthHistory(startMs, endMs) {
+  // The visible local day can straddle two UTC date files.
+  const days = [...new Set([utcDay(startMs), utcDay(endMs - 1)])];
+  const rows = [];
+  await Promise.all(
+    days.map(async (d) => {
+      try {
+        const r = await fetch(`${RAW_BASE}/${d.slice(0, 7)}/${d}.csv`, { cache: "no-store" });
+        if (!r.ok) return; // 404 = nothing logged for that day yet
+        const text = await r.text();
+        text.split("\n").slice(1).forEach((line) => {
+          const [t, obs] = line.split(",");
+          const ms = t ? new Date(t).getTime() : NaN;
+          const v = Number(obs);
+          if (!isNaN(ms) && !isNaN(v)) rows.push({ t: ms, v });
+        });
+      } catch {
+        /* offline / transient — fall back to the localStorage apHistory */
+      }
+    })
+  );
+  return rows.sort((a, b) => a.t - b.t);
+}
+
 // Halo behind SVG chart text: paints a cream stroke under the fill so labels
 // stay readable where they cross grid lines, fills and coloured bands.
 const textHalo = {
@@ -309,11 +342,22 @@ export default function App() {
       return Array.isArray(arr) ? arr.filter((p) => p && typeof p.t === "number" && typeof p.v === "number") : [];
     } catch { return []; }
   });
+  // Durable committed AP history for the day being viewed (server-collected).
+  const [apCommitted, setApCommitted] = useState([]);
 
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 30000);
     return () => clearInterval(id);
   }, []);
+
+  // ---- committed AP history for the viewed day (git-scraped tide log) ----
+  useEffect(() => {
+    let cancelled = false;
+    const start = isoToDate(selISO, "00:00").getTime();
+    const end = start + 24 * 3600 * 1000;
+    fetchFalmouthHistory(start, end).then((rows) => { if (!cancelled) setApCommitted(rows); });
+    return () => { cancelled = true; };
+  }, [selISO, refreshKey]);
 
   // Append each fresh AP observed reading to the persisted history (deduped by
   // its measurement timestamp; kept to the last 36 h).
@@ -568,10 +612,19 @@ export default function App() {
       : null;
 
   // Accumulated AP observed track, clipped to the displayed day → purple dotted line.
-  const apTrackPts = apHistory
-    .map((p) => ({ t: p.t, v: p.v }))
-    .filter((p) => p.t >= day.start && p.t <= day.end)
-    .sort((a, b) => a.t - b.t);
+  // Union of the durable committed log (server-collected, any day) and the live
+  // localStorage apHistory (this browser), deduped to the minute.
+  const apTrackPts = (() => {
+    const map = new Map();
+    const add = (t, v) => {
+      if (typeof v === "number" && !isNaN(v) && t >= day.start && t <= day.end) {
+        map.set(Math.round(t / 60000), { t, v });
+      }
+    };
+    apCommitted.forEach((p) => add(p.t, p.v));
+    apHistory.forEach((p) => add(p.t, p.v));
+    return [...map.values()].sort((a, b) => a.t - b.t);
+  })();
   const apTrackPath =
     apTrackPts.length > 1
       ? apTrackPts
