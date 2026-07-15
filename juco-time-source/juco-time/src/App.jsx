@@ -626,6 +626,58 @@ const SLIPS = [
 const DATUMS = [
   ["MHWS", 5.3], ["MHWN", 4.4], ["Mean level", 3.0], ["MLWN", 1.9], ["MLWS", 0.8],
 ];
+const datum = (name) => DATUMS.find(([n]) => n === name)[1];
+
+/* ---------------------------------------------------------------------
+   TIDAL COEFFICIENT (spring/neap index)
+   The French "coefficient de marée" runs ~20 (smallest neaps) to ~120
+   (biggest equinoctial springs), with 100 = a mean equinoctial spring.
+   It's a Brest-referenced figure and isn't published for UK ports, so
+   this is a Falmouth-local version: the predicted daily range scaled so
+   the mean spring range (MHWS − MLWS ≈ 4.5 m) reads 100. It lets you read
+   the fortnightly springs/neaps beat and the twice-yearly equinox peaks
+   at a glance. PREDICTIONS ONLY — not the official coefficient, and not
+   for navigation.
+   --------------------------------------------------------------------- */
+const COEF_SPRING_RANGE = datum("MHWS") - datum("MLWS"); // 4.5 m → coefficient 100
+const FAL_OFFSET_MS = 3600000; // +01:00 (BST) — matches how RAW dates are parsed
+const OFFICIAL_FIRST = OFFICIAL_EXTREMES[0].date.getTime();
+
+// HW/LW extremes falling inside one Falmouth-local day [startMs, endMs).
+// Uses the official predicted table where it reaches, else the harmonic model.
+function dayExtremes(startMs, endMs) {
+  if (startMs >= OFFICIAL_FIRST && endMs <= OFFICIAL_LAST) {
+    return OFFICIAL_EXTREMES.filter((e) => {
+      const t = e.date.getTime();
+      return t >= startMs && t < endMs;
+    });
+  }
+  return harmonicExtremes(startMs, endMs);
+}
+
+// One tidal-coefficient value per day for a whole calendar year.
+function coefficientYear(year) {
+  const out = [];
+  const first = Date.UTC(year, 0, 1) - FAL_OFFSET_MS; // local midnight, 1 Jan
+  const nDays = (Date.UTC(year + 1, 0, 1) - Date.UTC(year, 0, 1)) / 86400000;
+  for (let i = 0; i < nDays; i++) {
+    const startMs = first + i * 86400000;
+    const endMs = startMs + 86400000;
+    const estimated = !(startMs >= OFFICIAL_FIRST && endMs <= OFFICIAL_LAST);
+    const evs = dayExtremes(startMs, endMs);
+    const hs = evs.filter((e) => e.type === "H").map((e) => e.h);
+    const ls = evs.filter((e) => e.type === "L").map((e) => e.h);
+    const coef = hs.length && ls.length
+      ? Math.round((100 * (Math.max(...hs) - Math.min(...ls))) / COEF_SPRING_RANGE)
+      : null;
+    out.push({
+      iso: new Date(startMs + FAL_OFFSET_MS).toISOString().slice(0, 10),
+      month: new Date(startMs + FAL_OFFSET_MS).getUTCMonth(),
+      coef, estimated,
+    });
+  }
+  return out;
+}
 
 const C = {
   bg: "#ece2cf", panel: "#f8f2e3", panel2: "#fbf7ec", ink: "#1b2b3d",
@@ -702,6 +754,8 @@ export default function App() {
   });
   const [threshold, setThreshold] = useState(1.3);
   const [activeSlip, setActiveSlip] = useState("Grove Place slip");
+  const [coefYear, setCoefYear] = useState(2026);
+  const coefSeries = useMemo(() => coefficientYear(coefYear), [coefYear]);
 
   const [weather, setWeather] = useState(null);
   const [windHist, setWindHist] = useState(null);
@@ -1409,6 +1463,32 @@ export default function App() {
           </div>
         </section>
 
+        {/* ---------- TIDAL COEFFICIENT · WHOLE YEAR ---------- */}
+        <section style={{ ...card, marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+            <span style={label}>Tidal coefficient · {coefYear}</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <button onClick={() => setCoefYear((y) => y - 1)} disabled={coefYear <= 2026}
+                style={navBtn(coefYear > 2026)}>‹</button>
+              <span style={{
+                fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 16, minWidth: 48, textAlign: "center",
+              }}>{coefYear}</span>
+              <button onClick={() => setCoefYear((y) => y + 1)} disabled={coefYear >= 2027}
+                style={navBtn(coefYear < 2027)}>›</button>
+            </div>
+          </div>
+          <CoefficientChart series={coefSeries} year={coefYear} todayISO={todayISO()} />
+          <p style={{ fontSize: 12, color: C.inkSoft, margin: "10px 0 0", lineHeight: 1.5 }}>
+            Higher coefficient → bigger range and faster currents. The peaks are
+            springs (around new &amp; full moon), the troughs are neaps, roughly
+            a fortnight apart. Scaled so Falmouth's mean spring range reads{" "}
+            <strong>100</strong> — a local index in the style of the French
+            <em> coefficient de marée</em>, not an official figure. Shaded
+            months fall outside the official prediction table and are a harmonic
+            estimate. Predictions only — not for navigation.
+          </p>
+        </section>
+
         {/* ---------- REFERENCE PHOTO (nearest to live tide) ---------- */}
         <section style={{ ...card, marginBottom: 16 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 6 }}>
@@ -2047,6 +2127,126 @@ function LocalLive({ data, now }) {
         ) : (
           <div style={{ fontSize: 13, color: C.inkSoft }}>no tide reading</div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// Whole-year tidal-coefficient curve: one point per day, so the fortnightly
+// springs/neaps beat and the twice-yearly equinox envelope show up at a glance.
+function CoefficientChart({ series, year, todayISO }) {
+  const W = 760, H = 250, PL = 34, PR = 14, PT = 18, PB = 28;
+  const plotW = W - PL - PR, plotH = H - PT - PB;
+  const MONTHS3 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+  const n = series.length;
+  const coefs = series.map((s) => s.coef).filter((v) => v != null);
+  const dataMax = coefs.length ? Math.max(...coefs) : 120;
+  const dataMin = coefs.length ? Math.min(...coefs) : 20;
+  const yMax = Math.max(120, Math.ceil(dataMax / 10) * 10);
+  const yMin = Math.min(40, Math.floor(dataMin / 10) * 10);
+
+  const xOf = (i) => PL + (n > 1 ? (i / (n - 1)) * plotW : 0);
+  const yOf = (v) => PT + plotH - ((Math.max(yMin, Math.min(yMax, v)) - yMin) / (yMax - yMin)) * plotH;
+
+  // curve + area
+  const pts = series.map((s, i) => ({ i, coef: s.coef })).filter((p) => p.coef != null);
+  const linePath = pts.map((p, k) => `${k === 0 ? "M" : "L"}${xOf(p.i).toFixed(1)},${yOf(p.coef).toFixed(1)}`).join(" ");
+  const areaPath = pts.length
+    ? `${linePath} L${xOf(pts[pts.length - 1].i).toFixed(1)},${yOf(yMin)} L${xOf(pts[0].i).toFixed(1)},${yOf(yMin)} Z`
+    : "";
+
+  // horizontal reference band for the "big springs" zone (≥ 100)
+  const springBand = { y: yOf(yMax), h: yOf(100) - yOf(yMax) };
+
+  // contiguous harmonic-estimate stretch (before the official table starts, or after it ends)
+  const estIdx = series.map((s, i) => (s.estimated ? i : -1)).filter((i) => i >= 0);
+  const estRect = estIdx.length
+    ? { x: xOf(estIdx[0]), w: xOf(estIdx[estIdx.length - 1]) - xOf(estIdx[0]) }
+    : null;
+
+  // month boundaries (gridlines) and centred month labels
+  const monthStart = [];
+  const monthCenter = [];
+  for (let m = 0; m < 12; m++) {
+    const idxs = series.map((s, i) => (s.month === m ? i : -1)).filter((i) => i >= 0);
+    if (idxs.length) {
+      monthStart.push(idxs[0]);
+      monthCenter.push({ m, i: (idxs[0] + idxs[idxs.length - 1]) / 2 });
+    }
+  }
+
+  const todayIdx = series.findIndex((s) => s.iso === todayISO);
+  const today = todayIdx >= 0 ? series[todayIdx] : null;
+
+  // year's biggest tide
+  let peak = null;
+  for (const p of pts) if (!peak || p.coef > peak.coef) peak = p;
+
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 14, fontSize: 11, color: C.inkSoft, marginBottom: 8 }}>
+        <LegendItem color={C.seaDeep} label="daily coefficient" />
+        {estRect && (
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+            <span style={{ width: 14, height: 10, background: "rgba(176,125,34,0.16)", border: "1px solid rgba(176,125,34,0.35)", borderRadius: 2 }} />
+            <span>harmonic estimate</span>
+          </span>
+        )}
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+          <span style={{ width: 14, height: 10, background: C.seaFill, border: `1px solid ${C.lineSoft}`, borderRadius: 2 }} />
+          <span>springs (≥ 100)</span>
+        </span>
+      </div>
+      <div style={{ width: "100%", overflowX: "auto" }}>
+        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", minWidth: 560, display: "block" }}>
+          {/* big-springs band */}
+          <rect x={PL} y={springBand.y} width={plotW} height={springBand.h} fill={C.seaFill} />
+          {/* harmonic-estimate stretch */}
+          {estRect && <rect x={estRect.x} y={PT} width={estRect.w} height={plotH} fill="rgba(176,125,34,0.10)" />}
+          {/* y grid + labels every 20 */}
+          {Array.from({ length: Math.round((yMax - yMin) / 20) + 1 }, (_, k) => {
+            const v = yMin + k * 20;
+            return (
+              <g key={"y" + v}>
+                <line x1={PL} x2={W - PR} y1={yOf(v)} y2={yOf(v)}
+                  stroke={v === 100 ? C.line : C.lineSoft} strokeWidth={1}
+                  strokeDasharray={v === 100 ? "4 3" : undefined} />
+                <text {...textHalo} x={PL - 6} y={yOf(v) + 3} textAnchor="end" fontSize={10} fill={C.inkSoft}
+                  fontFamily="'Spline Sans Mono', monospace">{v}</text>
+              </g>
+            );
+          })}
+          {/* month gridlines + labels */}
+          {monthStart.map((i, k) => (
+            <line key={"m" + k} x1={xOf(i)} x2={xOf(i)} y1={PT} y2={PT + plotH} stroke={C.lineSoft} strokeWidth={1} />
+          ))}
+          {monthCenter.map(({ m, i }) => (
+            <text key={"ml" + m} {...textHalo} x={xOf(i)} y={H - 9} textAnchor="middle" fontSize={9.5}
+              fill={C.inkSoft} fontFamily="'Spline Sans Mono', monospace">{MONTHS3[m]}</text>
+          ))}
+          {/* the coefficient curve */}
+          {areaPath && <path d={areaPath} fill={C.seaFill} opacity={0.5} />}
+          {linePath && <path d={linePath} fill="none" stroke={C.seaDeep} strokeWidth={1.6}
+            strokeLinejoin="round" strokeLinecap="round" />}
+          {/* year's biggest tide */}
+          {peak && (
+            <g>
+              <circle cx={xOf(peak.i)} cy={yOf(peak.coef)} r={3.5} fill={C.sea} stroke="#fff" strokeWidth={1.4} />
+              <text {...textHalo} x={xOf(peak.i)} y={yOf(peak.coef) - 8} textAnchor="middle" fontSize={10.5}
+                fontWeight={700} fill={C.sea} fontFamily="Archivo">peak {peak.coef}</text>
+            </g>
+          )}
+          {/* today */}
+          {today && today.coef != null && (
+            <g>
+              <line x1={xOf(todayIdx)} x2={xOf(todayIdx)} y1={PT} y2={PT + plotH} stroke={C.red} strokeWidth={1.4} />
+              <circle cx={xOf(todayIdx)} cy={yOf(today.coef)} r={4.5} fill={C.red} stroke="#fff" strokeWidth={1.8} />
+              <text {...textHalo} x={xOf(todayIdx)} y={PT - 5} textAnchor="middle" fontSize={10.5} fontWeight={700}
+                fill={C.red} fontFamily="Archivo">today · {today.coef}</text>
+            </g>
+          )}
+        </svg>
       </div>
     </div>
   );
