@@ -1,11 +1,11 @@
 {
   "station": "Falmouth Docks",
-  "observed": 1.54,
-  "predicted": 1.35,
-  "surge": 0.19,
-  "time": "2026-07-28T10:20:54Z",
+  "observed": 2,
+  "predicted": 1.79,
+  "surge": 0.21,
+  "time": "2026-07-28T12:15:06Z",
   "datum": "m (Docks gauge · chart datum)",
   "source": "https://apfalmouth.port-log.net/live/Display.php",
-  "rows_today": 4,
+  "rows_today": 5,
   "file": "2026-07/2026-07-28.csv"
 }
