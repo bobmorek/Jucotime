@@ -600,6 +600,16 @@ function durStr(ms) {
   return `${h}h ${String(mm).padStart(2, "0")}m`;
 }
 
+// Daily status dot: colour alternates orange/green, flipping at local midnight.
+// Anchored so 12 Aug 2026 is green, 13 Aug orange, and so on.
+function dayCircleColor(now) {
+  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const greenAnchor = new Date(2026, 7, 12); // 12 Aug 2026 = green (month is 0-indexed)
+  const days = Math.round((startOfDay - greenAnchor) / 86400000);
+  const isGreen = (((days % 2) + 2) % 2) === 0;
+  return isGreen ? "#2f7d52" : "#e07b1f"; // green : orange
+}
+
 // ---- reference photos: capture time -> tide height at that moment ----
 const PHOTOS = [
   { key: "img2", src: asJpeg(IMG.img2), iso: "2026-04-20T13:04:00+01:00", caption: "Low water — boats almost aground, harbour wall well exposed" },
@@ -1047,7 +1057,18 @@ export default function App() {
       <div style={{ maxWidth: 880, margin: "0 auto", padding: "26px 18px 60px" }}>
 
         {/* ---------- header ---------- */}
-        <header style={{ marginBottom: 22 }}>
+        <header style={{ marginBottom: 22, position: "relative" }}>
+          {/* daily status dot — alternates orange/green, flips at local midnight */}
+          <div
+            aria-hidden="true"
+            title="Daily status"
+            style={{
+              position: "absolute", top: 0, right: 0,
+              width: 22, height: 22, borderRadius: "50%",
+              background: dayCircleColor(now),
+              boxShadow: `0 0 0 3px ${C.panel}, 0 1px 3px rgba(27,43,61,0.25)`,
+            }}
+          />
           <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
             <span style={{
               fontFamily: "'Spline Sans Mono', monospace", fontSize: 12,
