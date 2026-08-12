@@ -600,14 +600,21 @@ function durStr(ms) {
   return `${h}h ${String(mm).padStart(2, "0")}m`;
 }
 
-// Daily status dot: colour alternates orange/green, flipping at local midnight.
+// Daily status colour: alternates orange/green, flipping at local midnight.
 // Anchored so 12 Aug 2026 is green, 13 Aug orange, and so on.
-function dayCircleColor(now) {
+function dayIsGreen(now) {
   const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const greenAnchor = new Date(2026, 7, 12); // 12 Aug 2026 = green (month is 0-indexed)
   const days = Math.round((startOfDay - greenAnchor) / 86400000);
-  const isGreen = (((days % 2) + 2) % 2) === 0;
-  return isGreen ? "#2f7d52" : "#e07b1f"; // green : orange
+  return (((days % 2) + 2) % 2) === 0;
+}
+// Full-strength dot colour for the day.
+function dayCircleColor(now) {
+  return dayIsGreen(now) ? "#2f7d52" : "#e07b1f"; // green : orange
+}
+// Soft page-background tint matching the day's colour (green/orange wash).
+function dayBgColor(now) {
+  return dayIsGreen(now) ? "#dfe8dc" : "#f1e3ce"; // soft sage : soft peach
 }
 
 // ---- reference photos: capture time -> tide height at that moment ----
@@ -1047,7 +1054,8 @@ export default function App() {
 
   return (
     <div style={{
-      minHeight: "100vh", background: C.bg, color: C.ink,
+      minHeight: "100vh", background: dayBgColor(now), color: C.ink,
+      transition: "background 0.6s ease",
       fontFamily: "Archivo, sans-serif",
       backgroundImage:
         "linear-gradient(rgba(27,43,61,0.035) 1px, transparent 1px), linear-gradient(90deg, rgba(27,43,61,0.035) 1px, transparent 1px)",
