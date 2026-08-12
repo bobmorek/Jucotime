@@ -1056,19 +1056,22 @@ export default function App() {
       <style>{FONTS}</style>
       <div style={{ maxWidth: 880, margin: "0 auto", padding: "26px 18px 60px" }}>
 
+        {/* daily status dot — alternates orange/green, flips at local midnight.
+            Fixed to the true top-right corner of the page so it's unmistakable. */}
+        <div
+          aria-hidden="true"
+          title="Daily status"
+          style={{
+            position: "fixed", top: 16, right: 16, zIndex: 50,
+            width: 30, height: 30, borderRadius: "50%",
+            background: dayCircleColor(now),
+            border: "3px solid #fff",
+            boxShadow: `0 0 0 1px ${C.line}, 0 2px 8px rgba(27,43,61,0.35)`,
+          }}
+        />
+
         {/* ---------- header ---------- */}
         <header style={{ marginBottom: 22, position: "relative" }}>
-          {/* daily status dot — alternates orange/green, flips at local midnight */}
-          <div
-            aria-hidden="true"
-            title="Daily status"
-            style={{
-              position: "absolute", top: 0, right: 0,
-              width: 22, height: 22, borderRadius: "50%",
-              background: dayCircleColor(now),
-              boxShadow: `0 0 0 3px ${C.panel}, 0 1px 3px rgba(27,43,61,0.25)`,
-            }}
-          />
           <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
             <span style={{
               fontFamily: "'Spline Sans Mono', monospace", fontSize: 12,
