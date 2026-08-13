@@ -763,7 +763,7 @@ const label = {
   color: C.inkSoft, fontWeight: 600, fontFamily: "Archivo, sans-serif",
 };
 
-export default function App() {
+function JucoApp({ go }) {
   const [now, setNow] = useState(() => new Date());
   const [selISO, setSelISO] = useState(() => {
     const t = todayISO();
@@ -1117,6 +1117,8 @@ export default function App() {
     }}>
       <style>{FONTS}</style>
       <div style={{ maxWidth: 880, margin: "0 auto", padding: "26px 18px 60px" }}>
+
+        <TopNav current="juco" go={go} />
 
         {/* daily status dot — alternates orange/green, flips at local midnight.
             Fixed to the true top-right corner of the page so it's unmistakable. */}
@@ -1839,6 +1841,808 @@ export default function App() {
       </div>
     </div>
   );
+}
+
+// ---- shared top navigation between the two pages ----
+function TopNav({ current, go }) {
+  const btn = (active) => ({
+    cursor: "pointer", fontFamily: "Archivo, sans-serif", fontSize: 13, fontWeight: 700,
+    padding: "8px 14px", borderRadius: 999,
+    border: `1px solid ${active ? C.seaDeep : C.line}`,
+    background: active ? C.seaDeep : C.panel2,
+    color: active ? "#f8f2e3" : C.ink,
+    letterSpacing: "0.01em",
+  });
+  return (
+    <nav style={{ display: "flex", gap: 8, marginBottom: 20, flexWrap: "wrap" }}>
+      <button style={btn(current === "juco")} onClick={() => go("juco")}>⚓ Juco Time · Harbour</button>
+      <button style={btn(current === "gylly")} onClick={() => go("gylly")}>🏄 Gylly Tides · Beach</button>
+    </nav>
+  );
+}
+
+// ---- conditions helpers (surf / wind / sky) for the beach dashboard ----
+const WMO = {
+  0: "Clear", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
+  45: "Fog", 48: "Rime fog", 51: "Light drizzle", 53: "Drizzle", 55: "Heavy drizzle",
+  56: "Freezing drizzle", 57: "Freezing drizzle", 61: "Light rain", 63: "Rain", 65: "Heavy rain",
+  66: "Freezing rain", 67: "Freezing rain", 71: "Light snow", 73: "Snow", 75: "Heavy snow",
+  77: "Snow grains", 80: "Light showers", 81: "Showers", 82: "Violent showers",
+  85: "Snow showers", 86: "Snow showers", 95: "Thunderstorm", 96: "Thunderstorm + hail", 99: "Thunderstorm + hail",
+};
+const wxDesc = (c) => (c == null || isNaN(c) ? "—" : (WMO[c] || `code ${c}`));
+const CARDINALS = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"];
+const degToCardinal = (deg) =>
+  (deg == null || isNaN(deg)) ? "—" : CARDINALS[Math.round((((deg % 360) + 360) % 360) / 22.5) % 16];
+// Gyllyngvase opens to roughly SSE (~150°). Wind FROM the sea ≈ onshore;
+// FROM the land (≈NNW) ≈ offshore — the dangerous one for inflatables/swimmers.
+const BEACH_FACING = 150;
+function windShore(fromDeg) {
+  if (fromDeg == null || isNaN(fromDeg)) return null;
+  const delta = (((fromDeg - BEACH_FACING) % 360) + 360) % 360;
+  if (delta < 45 || delta > 315) return { tag: "onshore", tone: "warn" };
+  if (delta > 135 && delta < 225) return { tag: "offshore", tone: "danger" };
+  return { tag: "cross-shore", tone: "soft" };
+}
+function uvBand(uv) {
+  if (uv == null || isNaN(uv)) return null;
+  if (uv < 3) return { word: "Low", tone: "soft" };
+  if (uv < 6) return { word: "Moderate", tone: "warn" };
+  if (uv < 8) return { word: "High", tone: "warn" };
+  if (uv < 11) return { word: "Very high", tone: "danger" };
+  return { word: "Extreme", tone: "danger" };
+}
+const toneColor = (tone) =>
+  tone === "danger" ? C.danger : tone === "warn" ? C.wait : tone === "go" ? C.go : C.ink;
+const hmFromSec = (s) => {
+  if (s == null || isNaN(s)) return "—";
+  const m = Math.round(s / 60), h = Math.floor(m / 60);
+  return `${h}h ${String(m % 60).padStart(2, "0")}m`;
+};
+const fmtNum = (v, dp = 1) => (v == null || isNaN(v) ? "—" : Number(v).toFixed(dp));
+// Open-Meteo returns local (Europe/London) wall-clock without an offset; take
+// HH:MM straight from the string so it's exact regardless of the browser's TZ.
+const hhmm = (iso) => (iso && iso.length >= 16 ? iso.slice(11, 16) : "—");
+const condSubhead = {
+  ...label, color: C.seaDeep, marginTop: 16, marginBottom: 8,
+};
+const condRow = { display: "flex", flexWrap: "wrap", gap: 8 };
+
+function Stat({ k, v, unit, sub, tone }) {
+  return (
+    <div style={{
+      flex: "1 1 130px", minWidth: 130, maxWidth: 240, background: C.panel2,
+      border: `1px solid ${C.lineSoft}`, borderRadius: 10, padding: "11px 13px",
+    }}>
+      <div style={label}>{k}</div>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 5, marginTop: 4 }}>
+        <span style={{ fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 25, color: toneColor(tone) }}>{v}</span>
+        {unit && <span style={{ fontSize: 13, color: C.inkSoft }}>{unit}</span>}
+      </div>
+      {sub && <div style={{ fontSize: 11.5, color: C.inkSoft, marginTop: 3 }}>{sub}</div>}
+    </div>
+  );
+}
+
+// ---- plan-view of the beach with wind + swell direction arrows ----
+// Bearings are compass degrees the wind/swell come FROM; arrows point the way
+// they travel (bearing + 180). Map is drawn North-up.
+const bearingVec = (deg) => {
+  const r = (deg * Math.PI) / 180;
+  return { x: Math.sin(r), y: -Math.cos(r) }; // N=up, E=right (screen y down)
+};
+function PlanArrow({ cx, cy, fromDeg, len, color, tag }) {
+  if (fromDeg == null || isNaN(fromDeg)) return null;
+  const v = bearingVec(fromDeg + 180); // travel direction
+  const tail = { x: cx - v.x * len / 2, y: cy - v.y * len / 2 };
+  const head = { x: cx + v.x * len / 2, y: cy + v.y * len / 2 };
+  const hl = bearingVec(fromDeg + 180 + 148), hr = bearingVec(fromDeg + 180 - 148);
+  const hs = 12;
+  return (
+    <g>
+      <line x1={tail.x} y1={tail.y} x2={head.x} y2={head.y}
+        stroke={color} strokeWidth={4.5} strokeLinecap="round" />
+      <polygon
+        points={`${head.x},${head.y} ${head.x + hl.x * hs},${head.y + hl.y * hs} ${head.x + hr.x * hs},${head.y + hr.y * hs}`}
+        fill={color} />
+      <circle cx={tail.x} cy={tail.y} r={3.5} fill={color} />
+      <text {...textHalo} x={tail.x} y={tail.y - 8} textAnchor="middle"
+        fontSize={11} fontWeight={700} fill={color} fontFamily="Archivo">{tag}</text>
+    </g>
+  );
+}
+function BeachPlan({ windFrom, windColor, swellFrom, swellLabel, windLabel }) {
+  const W = 300, Ht = 250, cx = 150;
+  return (
+    <svg viewBox={`0 0 ${W} ${Ht}`} style={{ width: "100%", maxWidth: 420, display: "block", margin: "0 auto" }}>
+      {/* sea */}
+      <rect x={0} y={0} width={W} height={Ht} rx={14} fill="rgba(47,111,143,0.20)" />
+      {/* beach — sand crescent along the top (land side), concave to the sea */}
+      <path d={`M0,0 H${W} V46 Q${cx},92 0,46 Z`} fill="#e7d9b5" />
+      <path d={`M0,46 Q${cx},92 ${W},46`} fill="none" stroke="#cdbda0" strokeWidth={2} />
+      <text {...textHalo} x={cx} y={28} textAnchor="middle" fontSize={11.5} fontWeight={700}
+        fill="#8a7a56" fontFamily="Archivo" letterSpacing="0.08em">GYLLYNGVASE BEACH</text>
+      {/* cardinal ticks */}
+      {[["N", cx, 40], ["S", cx, Ht - 8], ["E", W - 10, Ht / 2 + 4], ["W", 12, Ht / 2 + 4]].map(([t, x, y]) => (
+        <text key={t} {...textHalo} x={x} y={y} textAnchor="middle" fontSize={10} fontWeight={700}
+          fill={C.inkSoft} fontFamily="'Spline Sans Mono', monospace">{t}</text>
+      ))}
+      {/* arrows over the sea */}
+      <PlanArrow cx={102} cy={158} fromDeg={swellFrom} len={92} color={C.seaDeep} tag={swellLabel} />
+      <PlanArrow cx={205} cy={150} fromDeg={windFrom} len={80} color={windColor} tag={windLabel} />
+    </svg>
+  );
+}
+
+/* =====================================================================
+   GYLLY TIDES — beach view for Gyllyngvase.
+   Same tide engine (RAW table + harmonic model) as Juco Time, reframed
+   around the low-tide rock shelf: how much water is over the shelf right
+   now and through the day. For surfers and surf lifesaving. The shelf
+   level is adjustable (and needs local calibration).
+   ===================================================================== */
+function GyllyApp({ go }) {
+  const [now, setNow] = useState(() => new Date());
+  const [selISO, setSelISO] = useState(() => {
+    const t = todayISO();
+    return dayAvailable(t) ? t : "2026-05-14";
+  });
+  // Low-tide shelf level, metres above chart datum. Placeholder default —
+  // calibrate against the real Gyllyngvase shelf, then set as the default.
+  const [shelf, setShelf] = useState(1.0);
+  // Live surf/marine + weather conditions (Open-Meteo, fetched client-side).
+  const [cond, setCond] = useState(null);
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 30000);
+    return () => clearInterval(id);
+  }, []);
+
+  // ---- live conditions: Open-Meteo Marine (surf, sea temp) + forecast ----
+  useEffect(() => {
+    let cancelled = false;
+    const LAT = 50.141, LON = -5.068; // Gyllyngvase Beach
+    async function load() {
+      try {
+        const marineURL =
+          `https://marine-api.open-meteo.com/v1/marine?latitude=${LAT}&longitude=${LON}` +
+          "&current=wave_height,wave_period,wave_direction,swell_wave_height,swell_wave_period," +
+          "swell_wave_direction,sea_surface_temperature&timezone=Europe%2FLondon";
+        const fcURL =
+          `https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}` +
+          "&current=temperature_2m,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m,precipitation,cloud_cover" +
+          "&hourly=visibility,uv_index&daily=sunrise,sunset,uv_index_max,daylight_duration" +
+          "&wind_speed_unit=kn&timezone=Europe%2FLondon&forecast_days=1";
+        const [mS, fS] = await Promise.allSettled([fetch(marineURL), fetch(fcURL)]);
+        let m = null, f = null;
+        if (mS.status === "fulfilled") { try { m = await mS.value.json(); } catch {} }
+        if (fS.status === "fulfilled") { try { f = await fS.value.json(); } catch {} }
+        if (cancelled) return;
+
+        // nearest hourly index to "now" for hourly-only fields (visibility, uv)
+        let hi = 0;
+        const hrTimes = (f && f.hourly && f.hourly.time) || [];
+        if (hrTimes.length) {
+          const target = Date.now();
+          let best = Infinity;
+          hrTimes.forEach((t, i) => {
+            const d = Math.abs(new Date(t).getTime() - target);
+            if (d < best) { best = d; hi = i; }
+          });
+        }
+        const mc = (m && m.current) || null;
+        const fc = (f && f.current) || null;
+        const fd = (f && f.daily) || null;
+        setCond({
+          surf: mc ? {
+            waveH: mc.wave_height, waveT: mc.wave_period, waveD: mc.wave_direction,
+            swellH: mc.swell_wave_height, swellT: mc.swell_wave_period, swellD: mc.swell_wave_direction,
+            seaTemp: mc.sea_surface_temperature,
+          } : null,
+          wx: fc ? {
+            airTemp: fc.temperature_2m, code: fc.weather_code,
+            wind: fc.wind_speed_10m, gust: fc.wind_gusts_10m, windDir: fc.wind_direction_10m,
+            precip: fc.precipitation, cloud: fc.cloud_cover,
+            vis: f.hourly && f.hourly.visibility ? f.hourly.visibility[hi] : null,
+            uv: f.hourly && f.hourly.uv_index ? f.hourly.uv_index[hi] : null,
+          } : null,
+          day: fd ? {
+            sunrise: fd.sunrise && fd.sunrise[0],
+            sunset: fd.sunset && fd.sunset[0],
+            uvMax: fd.uv_index_max && fd.uv_index_max[0],
+            daylight: fd.daylight_duration && fd.daylight_duration[0],
+          } : null,
+          error: !mc && !fc ? "No live data" : null,
+        });
+      } catch (e) {
+        if (!cancelled) setCond({ error: String(e.message || e) });
+      }
+    }
+    load();
+    const id = setInterval(load, 15 * 60 * 1000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+
+  const card = {
+    background: C.panel, border: `1px solid ${C.line}`, borderRadius: 14,
+    padding: 18, boxShadow: "0 1px 0 rgba(255,255,255,0.6) inset, 0 6px 18px rgba(27,43,61,0.07)",
+  };
+
+  const live = heightAt(now);
+  const { nextHigh, nextLow } = nextEvents(now);
+  const inRange = live !== null;
+
+  // ---------- selected day model ----------
+  const day = useMemo(() => {
+    const start = isoToDate(selISO, "00:00").getTime();
+    const end = start + 24 * 3600 * 1000;
+    const samples = [];
+    for (let m = 0; m <= 1440; m += 6) {
+      const r = heightAt(start + m * 60000);
+      samples.push({ m, h: r ? r.h : null });
+    }
+    const events = EXTREMES.filter((e) => {
+      const t = e.date.getTime();
+      return t >= start && t < end;
+    });
+    // exposed windows: contiguous runs where the tide is below the shelf
+    const exposed = [];
+    let runStart = null;
+    samples.forEach((s, i) => {
+      const off = s.h !== null && s.h < shelf;
+      if (off && runStart === null) runStart = s.m;
+      if ((!off || i === samples.length - 1) && runStart !== null) {
+        const endM = off ? s.m : samples[i - 1].m;
+        exposed.push({ from: runStart, to: endM });
+        runStart = null;
+      }
+    });
+    const valid = samples.filter((s) => s.h !== null);
+    const hs = valid.map((s) => s.h);
+    return {
+      start, end, samples, events, exposed,
+      maxH: hs.length ? Math.max(...hs) : 5,
+      minH: hs.length ? Math.min(...hs) : 0,
+    };
+  }, [selISO, shelf]);
+
+  const range = day.maxH - day.minH;
+
+  // ---------- chart geometry (mirrors the harbour chart) ----------
+  const W = 760, H = 290, PL = 40, PR = 16, PT = 16, PB = 30;
+  const plotW = W - PL - PR, plotH = H - PT - PB;
+  const yMax = Math.max(6, Math.ceil(day.maxH + 0.6));
+  const xOf = (m) => PL + (m / 1440) * plotW;
+  const yOf = (h) => PT + plotH - (h / yMax) * plotH;
+
+  const curvePts = day.samples.filter((s) => s.h !== null);
+  const linePath = curvePts
+    .map((s, i) => `${i === 0 ? "M" : "L"}${xOf(s.m).toFixed(1)},${yOf(s.h).toFixed(1)}`)
+    .join(" ");
+  const areaPath = curvePts.length
+    ? `${linePath} L${xOf(curvePts[curvePts.length - 1].m).toFixed(1)},${yOf(0)} L${xOf(curvePts[0].m).toFixed(1)},${yOf(0)} Z`
+    : "";
+
+  const isToday = selISO === todayISO();
+  const nowM = isToday ? (now.getTime() - day.start) / 60000 : null;
+  const showNowMark = nowM !== null && nowM >= 0 && nowM <= 1440;
+
+  // ---------- live shelf status ----------
+  const CAUTION = 0.3; // m of water over the shelf below which it's a hazard
+  const clearance = inRange ? live.h - shelf : null;
+  const status =
+    clearance === null ? null
+      : clearance <= 0 ? "exposed"
+        : clearance <= CAUTION ? "caution" : "covered";
+  const statusMeta = {
+    covered: { word: "COVERED", color: C.go, bg: "rgba(47,125,82,0.10)" },
+    caution: { word: "SHALLOW", color: C.wait, bg: "rgba(176,125,34,0.12)" },
+    exposed: { word: "SHELF DRY", color: C.danger, bg: "rgba(169,63,48,0.10)" },
+  };
+  const sm = status ? statusMeta[status] : null;
+  const lowClear = nextLow ? nextLow.h - shelf : null;
+
+  const SHELF_PRESETS = [0.5, 0.8, 1.0, 1.3];
+
+  // ---------- live conditions (derived tones/labels) ----------
+  const surf = cond && cond.surf;
+  const wx = cond && cond.wx;
+  const cDay = cond && cond.day;
+  const shore = wx ? windShore(wx.windDir) : null;
+  const uvb = wx ? uvBand(wx.uv) : null;
+  const seaTone = surf && surf.seaTemp != null
+    ? (surf.seaTemp < 10 ? "danger" : surf.seaTemp < 14 ? "warn" : "soft") : "soft";
+  const waveTone = surf && surf.waveH != null
+    ? (surf.waveH >= 2.5 ? "danger" : surf.waveH >= 1.2 ? "warn" : "soft") : "soft";
+  const gustTone = wx && wx.gust != null
+    ? (wx.gust >= 25 ? "danger" : wx.gust >= 16 ? "warn" : "soft") : "soft";
+  const visKm = wx && wx.vis != null ? wx.vis / 1000 : null;
+  const visTone = visKm != null ? (visKm < 1 ? "danger" : visKm < 4 ? "warn" : "soft") : "soft";
+  const sunsetD = cDay && cDay.sunset ? new Date(cDay.sunset) : null;
+  const sunsetInStr = sunsetD && sunsetD > now ? `${durStr(sunsetD - now)} to sunset` : null;
+
+  return (
+    <div style={{
+      minHeight: "100vh", background: C.bg, color: C.ink,
+      fontFamily: "Archivo, sans-serif",
+      backgroundImage:
+        "linear-gradient(rgba(27,43,61,0.035) 1px, transparent 1px), linear-gradient(90deg, rgba(27,43,61,0.035) 1px, transparent 1px)",
+      backgroundSize: "26px 26px",
+    }}>
+      <style>{FONTS}</style>
+      <div style={{ maxWidth: 880, margin: "0 auto", padding: "26px 18px 60px" }}>
+
+        <TopNav current="gylly" go={go} />
+
+        {/* ---------- header ---------- */}
+        <header style={{ marginBottom: 22 }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+            <span style={{
+              fontFamily: "'Spline Sans Mono', monospace", fontSize: 12,
+              color: C.red, fontWeight: 600, letterSpacing: "0.1em",
+            }}>50°08′N · 005°04′W</span>
+            <span style={{ ...label, color: C.inkSoft }}>Gyllyngvase Beach, Falmouth</span>
+          </div>
+          <h1 style={{
+            fontFamily: "'Fraunces', serif", fontWeight: 600,
+            fontSize: "clamp(30px, 6vw, 46px)", lineHeight: 1.04,
+            margin: "4px 0 2px", letterSpacing: "-0.01em",
+          }}>
+            Gylly Tides
+          </h1>
+          <p style={{
+            fontFamily: "'Fraunces', serif", fontStyle: "italic", fontWeight: 500,
+            fontSize: 17, color: C.red, margin: "2px 0 0", letterSpacing: "0.005em",
+          }}>
+            water over the low-tide shelf · for surfers &amp; surf lifesaving
+          </p>
+        </header>
+
+        {/* ---------- LIVE NOW ---------- */}
+        <section style={{ ...card, marginBottom: 16, padding: 0, overflow: "hidden" }}>
+          <div style={{
+            display: "flex", justifyContent: "space-between", alignItems: "center",
+            padding: "12px 18px", borderBottom: `1px solid ${C.lineSoft}`,
+            background: C.panel2,
+          }}>
+            <span style={label}>Live now</span>
+            <span style={{
+              fontFamily: "'Spline Sans Mono', monospace", fontSize: 13, color: C.ink, fontWeight: 600,
+            }}>
+              {fmtDayLong(now)} · {fmtTime(now)}
+            </span>
+          </div>
+
+          {!inRange ? (
+            <div style={{ padding: 22, color: C.inkSoft, fontSize: 14 }}>
+              Predictions run from <strong>19 Apr 2026</strong> to about <strong>Dec 2027</strong>
+              {" "}(official table to 30 Jun 2026, harmonic estimate beyond). Now falls outside
+              that range — use the day planner below to look within it.
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexWrap: "wrap" }}>
+              {/* big height */}
+              <div style={{
+                flex: "1 1 220px", padding: "20px 18px",
+                borderRight: `1px solid ${C.lineSoft}`,
+              }}>
+                <div style={label}>Tide height (above chart datum)</div>
+                <div style={{ display: "flex", alignItems: "flex-end", gap: 8, marginTop: 4 }}>
+                  <span style={{
+                    fontFamily: "'Fraunces', serif", fontWeight: 600,
+                    fontSize: 58, lineHeight: 0.95, color: C.seaDeep,
+                  }}>{live.h.toFixed(2)}</span>
+                  <span style={{ fontSize: 20, color: C.inkSoft, paddingBottom: 8 }}>m</span>
+                </div>
+                {live.predicted && (
+                  <div style={{ marginTop: 4, fontSize: 11, color: C.inkSoft, fontStyle: "italic" }}>
+                    harmonic estimate (beyond published table)
+                  </div>
+                )}
+                <div style={{
+                  marginTop: 8, fontSize: 14, fontWeight: 600,
+                  color: live.rising ? C.sea : C.wait,
+                }}>
+                  {live.rising ? "▲ Flooding (rising)" : "▼ Ebbing (falling)"}
+                </div>
+              </div>
+
+              {/* water over shelf */}
+              <div style={{ flex: "1 1 220px", padding: "20px 18px", borderRight: `1px solid ${C.lineSoft}` }}>
+                <div style={label}>Water over shelf</div>
+                <div style={{ display: "flex", alignItems: "flex-end", gap: 8, marginTop: 4 }}>
+                  <span style={{
+                    fontFamily: "'Fraunces', serif", fontWeight: 600,
+                    fontSize: 44, lineHeight: 0.95, color: sm.color,
+                  }}>{clearance > 0 ? clearance.toFixed(2) : "0"}</span>
+                  <span style={{ fontSize: 18, color: C.inkSoft, paddingBottom: 6 }}>m</span>
+                </div>
+                <div style={{ fontSize: 13, color: C.inkSoft, marginTop: 6 }}>
+                  shelf set at {shelf.toFixed(1)} m
+                </div>
+                {nextLow && (
+                  <div style={{ fontSize: 12, color: C.inkSoft, marginTop: 8 }}>
+                    Lowest at <span style={{ fontFamily: "'Spline Sans Mono', monospace" }}>{fmtTime(nextLow.date)}</span>
+                    {" "}·{" "}
+                    <strong style={{ color: lowClear <= CAUTION ? C.danger : C.inkSoft }}>
+                      {lowClear > 0 ? `${lowClear.toFixed(2)} m over` : `${Math.abs(lowClear).toFixed(2)} m below`}
+                    </strong>
+                  </div>
+                )}
+              </div>
+
+              {/* shelf status */}
+              <div style={{
+                flex: "1 1 200px", padding: "20px 18px",
+                background: sm.bg,
+              }}>
+                <div style={label}>Shelf status</div>
+                <div style={{
+                  marginTop: 6, fontFamily: "'Fraunces', serif", fontWeight: 600,
+                  fontSize: 26, color: sm.color,
+                }}>
+                  {sm.word}
+                </div>
+                <div style={{ fontSize: 13, color: C.inkSoft, marginTop: 2 }}>
+                  {status === "covered"
+                    ? `${clearance.toFixed(2)} m of water over the shelf`
+                    : status === "caution"
+                      ? `Only ${clearance.toFixed(2)} m over — shelf near the surface`
+                      : `Tide is at/under the shelf — rocks exposed`}
+                </div>
+              </div>
+            </div>
+          )}
+        </section>
+
+        {/* ---------- LIVE CONDITIONS (risk-assessment inputs) ---------- */}
+        <section style={{ ...card, marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 6 }}>
+            <span style={label}>Live conditions</span>
+            <span style={{ fontSize: 12, color: C.inkSoft }}>surf lifesaving · risk-assessment inputs</span>
+          </div>
+
+          {!cond ? (
+            <p style={{ fontSize: 13, color: C.inkSoft, margin: "10px 0 0" }}>Loading live conditions…</p>
+          ) : (!surf && !wx) ? (
+            <p style={{ fontSize: 13, color: C.danger, margin: "10px 0 0" }}>
+              Live conditions unavailable right now{cond.error ? ` (${cond.error})` : ""}.
+            </p>
+          ) : (
+            <>
+              {/* surf & sea */}
+              <div style={condSubhead}>Surf &amp; sea</div>
+              <div style={condRow}>
+                <Stat k="Wave height" v={fmtNum(surf?.waveH, 1)} unit="m" tone={waveTone}
+                  sub={surf?.waveD != null ? `from ${degToCardinal(surf.waveD)}` : null} />
+                <Stat k="Wave period" v={fmtNum(surf?.waveT, 0)} unit="s"
+                  sub={surf?.waveT != null ? (surf.waveT >= 10 ? "groundswell" : "wind sea") : null} />
+                <Stat k="Swell" v={fmtNum(surf?.swellH, 1)} unit="m"
+                  sub={surf?.swellT != null ? `${fmtNum(surf.swellT, 0)} s · ${degToCardinal(surf.swellD)}` : null} />
+                <Stat k="Sea temp" v={fmtNum(surf?.seaTemp, 1)} unit="°C" tone={seaTone}
+                  sub={surf?.seaTemp != null ? (surf.seaTemp < 10 ? "cold — casualty risk" : surf.seaTemp < 14 ? "cool — wetsuit" : "mild") : null} />
+              </div>
+
+              {/* wind */}
+              <div style={condSubhead}>Wind</div>
+              <div style={condRow}>
+                <Stat k="Wind" v={fmtNum(wx?.wind, 0)} unit="kn"
+                  sub={wx?.windDir != null ? `from ${degToCardinal(wx.windDir)}` : null} />
+                <Stat k="Gusts" v={fmtNum(wx?.gust, 0)} unit="kn" tone={gustTone} />
+                <Stat k="Shore" v={shore ? shore.tag : "—"} tone={shore ? shore.tone : "soft"}
+                  sub={shore && shore.tag === "offshore" ? "blows off the beach" : null} />
+              </div>
+
+              {/* weather & visibility */}
+              <div style={condSubhead}>Weather &amp; visibility</div>
+              <div style={condRow}>
+                <Stat k="Air temp" v={fmtNum(wx?.airTemp, 0)} unit="°C" />
+                <Stat k="Weather" v={wxDesc(wx?.code)}
+                  sub={wx?.cloud != null ? `${fmtNum(wx.cloud, 0)}% cloud` : null} />
+                <Stat k="Rain" v={fmtNum(wx?.precip, 1)} unit="mm" />
+                <Stat k="Visibility" v={visKm != null ? fmtNum(visKm, 1) : "—"} unit="km" tone={visTone}
+                  sub={visKm != null && visKm < 4 ? "reduced" : null} />
+                <Stat k="UV index" v={fmtNum(wx?.uv, 0)} tone={uvb ? uvb.tone : "soft"}
+                  sub={uvb ? uvb.word : null} />
+              </div>
+
+              {/* daylight */}
+              <div style={condSubhead}>Daylight</div>
+              <div style={condRow}>
+                <Stat k="Sunrise" v={hhmm(cDay?.sunrise)} />
+                <Stat k="Sunset" v={hhmm(cDay?.sunset)} />
+                <Stat k="Daylight" v={hmFromSec(cDay?.daylight)} sub={sunsetInStr} />
+                <Stat k="UV max today" v={fmtNum(cDay?.uvMax, 0)}
+                  tone={uvBand(cDay?.uvMax) ? uvBand(cDay?.uvMax).tone : "soft"} />
+              </div>
+
+              <p style={{ fontSize: 11.5, color: C.inkSoft, marginTop: 14, lineHeight: 1.5 }}>
+                Live marine &amp; weather from Open-Meteo, refreshed every 15 min, for Gyllyngvase
+                (50.14°N, 5.07°W). Shore-relation assumes the beach faces ~SSE. Model/forecast values
+                to support a dynamic risk assessment — always confirm against conditions on the day.
+              </p>
+            </>
+          )}
+        </section>
+
+        {/* ---------- BEACH PLAN (wind + swell arrows) ---------- */}
+        <section style={{ ...card, marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 6 }}>
+            <span style={label}>Beach plan</span>
+            <span style={{ fontSize: 12, color: C.inkSoft }}>wind &amp; swell direction</span>
+          </div>
+          <div style={{ marginTop: 12 }}>
+            <BeachPlan
+              windFrom={wx ? wx.windDir : null}
+              windColor={shore ? toneColor(shore.tone) : C.ink}
+              windLabel={wx && wx.windDir != null ? `WIND ${degToCardinal(wx.windDir)}` : ""}
+              swellFrom={surf ? (surf.swellD != null ? surf.swellD : surf.waveD) : null}
+              swellLabel={
+                surf && (surf.swellD != null || surf.waveD != null)
+                  ? `SWELL ${degToCardinal(surf.swellD != null ? surf.swellD : surf.waveD)}` : ""
+              }
+            />
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 16, marginTop: 12, fontSize: 12.5 }}>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+              <span style={{ width: 22, height: 4, background: C.seaDeep, borderRadius: 2 }} />
+              <span style={{ color: C.ink }}>
+                Swell{surf && (surf.swellD != null || surf.waveD != null)
+                  ? ` — from ${degToCardinal(surf.swellD != null ? surf.swellD : surf.waveD)}${surf.swellT != null ? `, ${fmtNum(surf.swellT, 0)} s` : ""}` : " — —"}
+              </span>
+            </span>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+              <span style={{ width: 22, height: 4, background: shore ? toneColor(shore.tone) : C.ink, borderRadius: 2 }} />
+              <span style={{ color: C.ink }}>
+                Wind{wx && wx.windDir != null
+                  ? ` — from ${degToCardinal(wx.windDir)}${shore ? ` (${shore.tag})` : ""}` : " — —"}
+              </span>
+            </span>
+          </div>
+          <p style={{ fontSize: 11.5, color: C.inkSoft, marginTop: 10, lineHeight: 1.5 }}>
+            Schematic, North up · Gyllyngvase faces ~SSE. Arrows point the way the wind and swell
+            are travelling. Offshore wind (blowing off the beach, out to sea) is the danger for
+            inflatables and weaker swimmers.
+          </p>
+        </section>
+
+        {/* ---------- SHELF LEVEL SETTINGS ---------- */}
+        <section style={{ ...card, marginBottom: 16 }}>
+          <span style={label}>Low-tide shelf level</span>
+          <p style={{ fontSize: 13, color: C.inkSoft, margin: "6px 0 12px" }}>
+            Tide height (above chart datum) at which the shelf starts to dry out. This is a
+            placeholder — <strong>calibrate it against the real Gyllyngvase shelf</strong> and it
+            will drive the status and the shaded hazard band below.
+          </p>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
+            {SHELF_PRESETS.map((v) => {
+              const on = Math.abs(shelf - v) < 0.001;
+              return (
+                <button key={v}
+                  onClick={() => setShelf(v)}
+                  style={{
+                    cursor: "pointer", fontFamily: "Archivo, sans-serif",
+                    fontSize: 13, fontWeight: 600,
+                    padding: "8px 12px", borderRadius: 9,
+                    border: `1px solid ${on ? C.seaDeep : C.line}`,
+                    background: on ? C.seaDeep : C.panel2,
+                    color: on ? "#f8f2e3" : C.ink,
+                  }}>
+                  {v.toFixed(1)} m
+                </button>
+              );
+            })}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+            <input
+              type="range" min={0} max={3} step={0.1} value={shelf}
+              onChange={(e) => setShelf(Number(e.target.value))}
+              style={{ flex: "1 1 240px", accentColor: C.seaDeep }}
+            />
+            <span style={{
+              fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 22, color: C.seaDeep,
+              minWidth: 70, textAlign: "right",
+            }}>{shelf.toFixed(1)} m</span>
+          </div>
+        </section>
+
+        {/* ---------- DAY PLANNER ---------- */}
+        <section style={{ ...card, marginBottom: 16 }}>
+          <div style={{
+            display: "flex", justifyContent: "space-between", alignItems: "center",
+            marginBottom: 10, flexWrap: "wrap", gap: 8,
+          }}>
+            <span style={label}>Day planner</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <button onClick={() => setSelISO(shiftISO(selISO, -1))} disabled={!dayAvailable(shiftISO(selISO, -1))}
+                style={navBtn(dayAvailable(shiftISO(selISO, -1)))}>‹</button>
+              <span style={{
+                fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 18, minWidth: 132, textAlign: "center",
+              }}>
+                {fmtDayLong(isoToDate(selISO))}
+                {selISO === todayISO() && (
+                  <span style={{ color: C.red, fontSize: 12, fontFamily: "Archivo", marginLeft: 6 }}>TODAY</span>
+                )}
+                {isoToDate(selISO, "12:00").getTime() > OFFICIAL_LAST && (
+                  <span title="Harmonic estimate — beyond the official table (to 30 Jun 2026)"
+                    style={{ color: C.wait, fontSize: 11, fontWeight: 700, fontFamily: "Archivo", marginLeft: 6 }}>≈ EST</span>
+                )}
+              </span>
+              <button onClick={() => setSelISO(shiftISO(selISO, 1))} disabled={!dayAvailable(shiftISO(selISO, 1))}
+                style={navBtn(dayAvailable(shiftISO(selISO, 1)))}>›</button>
+            </div>
+          </div>
+
+          {/* chart legend */}
+          <div style={{
+            display: "flex", flexWrap: "wrap", gap: 14,
+            fontSize: 11, color: C.inkSoft, marginBottom: 8,
+          }}>
+            <LegendItem color={C.seaDeep} label="tide prediction" />
+            <LegendItem color={C.wait} label="shelf level" />
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+              <span style={{
+                width: 14, height: 10, background: "rgba(169,63,48,0.18)",
+                border: "1px solid rgba(169,63,48,0.35)", borderRadius: 2,
+              }} />
+              <span>shelf drying / shallow</span>
+            </span>
+          </div>
+
+          {/* chart */}
+          <div style={{ width: "100%", overflowX: "auto" }}>
+            <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", minWidth: 480, display: "block" }}>
+              {/* horizontal grid (metre lines) */}
+              {Array.from({ length: yMax + 1 }, (_, h) => (
+                <g key={"h" + h}>
+                  <line x1={PL} x2={W - PR} y1={yOf(h)} y2={yOf(h)}
+                    stroke={C.lineSoft} strokeWidth={1} />
+                  <text {...textHalo} x={PL - 6} y={yOf(h) + 3} textAnchor="end"
+                    fontSize={10} fill={C.inkSoft} fontFamily="'Spline Sans Mono', monospace">{h}</text>
+                </g>
+              ))}
+              {/* vertical grid (every 3h) */}
+              {[0, 3, 6, 9, 12, 15, 18, 21, 24].map((hr) => (
+                <g key={"v" + hr}>
+                  <line x1={xOf(hr * 60)} x2={xOf(hr * 60)} y1={PT} y2={PT + plotH}
+                    stroke={C.lineSoft} strokeWidth={1} />
+                  <text {...textHalo} x={xOf(hr * 60)} y={H - 10} textAnchor="middle"
+                    fontSize={10} fill={C.inkSoft} fontFamily="'Spline Sans Mono', monospace">
+                    {String(hr).padStart(2, "0")}
+                  </text>
+                </g>
+              ))}
+              {/* shade shelf-drying zone (below shelf level) */}
+              <rect
+                x={PL} y={yOf(shelf)} width={plotW}
+                height={PT + plotH - yOf(shelf)}
+                fill="rgba(169,63,48,0.10)"
+              />
+              {/* tide curve */}
+              {areaPath && <path d={areaPath} fill={C.seaFill} />}
+              {linePath && <path d={linePath} fill="none" stroke={C.seaDeep} strokeWidth={2.4} />}
+              {/* shelf level line */}
+              <line x1={PL} x2={W - PR} y1={yOf(shelf)} y2={yOf(shelf)}
+                stroke={C.wait} strokeWidth={2.4} />
+              <text {...textHalo} x={W - PR - 4} y={yOf(shelf) - 5} textAnchor="end"
+                fontSize={11} fill={C.wait} fontWeight={700} fontFamily="Archivo">
+                shelf · {shelf.toFixed(1)} m
+              </text>
+              {/* HW / LW markers */}
+              {day.events.map((e, i) => {
+                const m = (e.date.getTime() - day.start) / 60000;
+                const high = e.type === "H";
+                return (
+                  <g key={"e" + i}>
+                    <circle cx={xOf(m)} cy={yOf(e.h)} r={4} fill={high ? C.sea : C.wait}
+                      stroke="#fff" strokeWidth={1.5} />
+                    <text {...textHalo} x={xOf(m)} y={yOf(e.h) + (high ? -10 : 18)} textAnchor="middle"
+                      fontSize={10.5} fontWeight={700} fill={high ? C.sea : C.wait}
+                      fontFamily="Archivo">
+                      {high ? "HW " : "LW "}{fmtTime(e.date)}
+                    </text>
+                  </g>
+                );
+              })}
+              {/* now marker */}
+              {showNowMark && (
+                <g>
+                  <line x1={xOf(nowM)} x2={xOf(nowM)} y1={PT} y2={PT + plotH}
+                    stroke={C.red} strokeWidth={1.5} />
+                  {live && (
+                    <circle cx={xOf(nowM)} cy={yOf(live.h)} r={5} fill={C.red}
+                      stroke="#fff" strokeWidth={2} />
+                  )}
+                  <text {...textHalo} x={xOf(nowM)} y={PT - 4} textAnchor="middle"
+                    fontSize={10} fontWeight={700} fill={C.red} fontFamily="Archivo">NOW</text>
+                </g>
+              )}
+            </svg>
+          </div>
+
+          {/* day summary chips */}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 6, marginBottom: 12 }}>
+            <Chip k="Range" v={`${range.toFixed(1)} m`} />
+            <Chip k="High water" v={`${day.maxH.toFixed(1)} m`} />
+            <Chip k="Low water" v={`${day.minH.toFixed(1)} m`} />
+            <Chip k="Shelf clears LW by" v={`${(day.minH - shelf).toFixed(1)} m`} />
+          </div>
+
+          {/* shelf-exposed windows */}
+          <div>
+            <span style={label}>Shelf drying (tide &lt; {shelf.toFixed(1)} m)</span>
+            {day.exposed.length === 0 ? (
+              <p style={{ fontSize: 14, color: C.go, margin: "8px 0 0", fontWeight: 600 }}>
+                Shelf stays covered all day — tide never drops below {shelf.toFixed(1)} m.
+              </p>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
+                {day.exposed.map((w, i) => {
+                  const from = new Date(day.start + w.from * 60000);
+                  const to = new Date(day.start + w.to * 60000);
+                  return (
+                    <div key={i} style={{
+                      display: "flex", justifyContent: "space-between", alignItems: "center",
+                      background: "rgba(169,63,48,0.09)", border: `1px solid rgba(169,63,48,0.30)`,
+                      borderRadius: 9, padding: "9px 12px",
+                    }}>
+                      <span style={{
+                        fontFamily: "'Spline Sans Mono', monospace", fontWeight: 600, fontSize: 15, color: C.danger,
+                      }}>
+                        {fmtTime(from)} – {fmtTime(to)}
+                      </span>
+                      <span style={{ fontSize: 12, color: C.inkSoft }}>
+                        {durStr(to - from)} shallow
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </section>
+
+        {/* ---------- NOTES ---------- */}
+        <section style={{ ...card, marginBottom: 16 }}>
+          <span style={label}>About this page</span>
+          <p style={{ fontSize: 13, color: C.inkSoft, margin: "8px 0 0", lineHeight: 1.55 }}>
+            Same Falmouth tide predictions as Juco Time, shown against the Gyllyngvase low-tide
+            shelf. "Water over shelf" is the predicted tide height minus your shelf level; the red
+            band is where the shelf dries out or barely covers. Heights are astronomical
+            predictions — wind, low pressure or surge can shift the real level by 0.3 m or more.
+            Always keep your own margin and watch the water. The shelf level here is a placeholder
+            pending local calibration.
+          </p>
+        </section>
+
+        <p style={{
+          textAlign: "center", fontSize: 11, color: C.inkSoft, marginTop: 20,
+          fontFamily: "'Spline Sans Mono', monospace",
+        }}>
+          GYLLY TIDES · GYLLYNGVASE BEACH · A BOOM PRODUCTION
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ---- routing wrapper: hash-based switch between the two pages ----
+const readPage = () =>
+  (typeof window !== "undefined" && window.location.hash.replace(/^#/, "") === "gylly")
+    ? "gylly" : "juco";
+
+export default function App() {
+  const [page, setPage] = useState(readPage);
+  useEffect(() => {
+    const onHash = () => setPage(readPage());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  const go = (p) => {
+    window.location.hash = p === "gylly" ? "gylly" : "";
+    window.scrollTo(0, 0);
+  };
+  return page === "gylly" ? <GyllyApp go={go} /> : <JucoApp go={go} />;
 }
 
 function LegendItem({ color, label, dashed }) {
