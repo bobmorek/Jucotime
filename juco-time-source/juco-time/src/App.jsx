@@ -1874,9 +1874,9 @@ const wxDesc = (c) => (c == null || isNaN(c) ? "—" : (WMO[c] || `code ${c}`));
 const CARDINALS = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"];
 const degToCardinal = (deg) =>
   (deg == null || isNaN(deg)) ? "—" : CARDINALS[Math.round((((deg % 360) + 360) % 360) / 22.5) % 16];
-// Gyllyngvase opens to roughly SSE (~150°). Wind FROM the sea ≈ onshore;
-// FROM the land (≈NNW) ≈ offshore — the dangerous one for inflatables/swimmers.
-const BEACH_FACING = 150;
+// Gyllyngvase faces SE (~135°). Wind FROM the sea ≈ onshore; FROM the land
+// (≈NW) ≈ offshore — the dangerous one for inflatables/swimmers.
+const BEACH_FACING = 135;
 function windShore(fromDeg) {
   if (fromDeg == null || isNaN(fromDeg)) return null;
   const delta = (((fromDeg - BEACH_FACING) % 360) + 360) % 360;
@@ -1952,24 +1952,29 @@ function PlanArrow({ cx, cy, fromDeg, len, color, tag }) {
   );
 }
 function BeachPlan({ windFrom, windColor, swellFrom, swellLabel, windLabel }) {
-  const W = 300, Ht = 250, cx = 150;
+  const W = 300, Ht = 250;
+  // Beach faces SE (~135°): land/sand to the NW, open sea to the SE. North up,
+  // shoreline running NE–SW.
   return (
     <svg viewBox={`0 0 ${W} ${Ht}`} style={{ width: "100%", maxWidth: 420, display: "block", margin: "0 auto" }}>
-      {/* sea */}
+      {/* sea — fills the map; the SE (lower-right) is open water */}
       <rect x={0} y={0} width={W} height={Ht} rx={14} fill="rgba(47,111,143,0.20)" />
-      {/* beach — sand crescent along the top (land side), concave to the sea */}
-      <path d={`M0,0 H${W} V46 Q${cx},92 0,46 Z`} fill="#e7d9b5" />
-      <path d={`M0,46 Q${cx},92 ${W},46`} fill="none" stroke="#cdbda0" strokeWidth={2} />
-      <text {...textHalo} x={cx} y={28} textAnchor="middle" fontSize={11.5} fontWeight={700}
-        fill="#8a7a56" fontFamily="Archivo" letterSpacing="0.08em">GYLLYNGVASE BEACH</text>
+      {/* beach — sand along the NW edge, concave to the sea */}
+      <path d="M0,0 H255 Q150,120 0,175 Z" fill="#e7d9b5" />
+      <path d="M255,0 Q150,120 0,175" fill="none" stroke="#cdbda0" strokeWidth={2} />
+      {/* beach label, set along the shoreline */}
+      <text {...textHalo} transform="rotate(-35 120 62)" x={120} y={62} textAnchor="middle"
+        fontSize={10.5} fontWeight={700} fill="#8a7a56" fontFamily="Archivo" letterSpacing="0.05em">GYLLYNGVASE BEACH</text>
+      <text {...textHalo} x={W - 12} y={Ht - 14} textAnchor="end" fontSize={9.5} fontStyle="italic"
+        fill={C.inkSoft} fontFamily="Archivo">open sea · SE</text>
       {/* cardinal ticks */}
-      {[["N", cx, 40], ["S", cx, Ht - 8], ["E", W - 10, Ht / 2 + 4], ["W", 12, Ht / 2 + 4]].map(([t, x, y]) => (
+      {[["N", 150, 14], ["S", 150, Ht - 6], ["E", W - 8, Ht / 2], ["W", 10, Ht / 2]].map(([t, x, y]) => (
         <text key={t} {...textHalo} x={x} y={y} textAnchor="middle" fontSize={10} fontWeight={700}
           fill={C.inkSoft} fontFamily="'Spline Sans Mono', monospace">{t}</text>
       ))}
       {/* arrows over the sea */}
-      <PlanArrow cx={102} cy={158} fromDeg={swellFrom} len={92} color={C.seaDeep} tag={swellLabel} />
-      <PlanArrow cx={205} cy={150} fromDeg={windFrom} len={80} color={windColor} tag={windLabel} />
+      <PlanArrow cx={140} cy={182} fromDeg={swellFrom} len={86} color={C.seaDeep} tag={swellLabel} />
+      <PlanArrow cx={224} cy={136} fromDeg={windFrom} len={76} color={windColor} tag={windLabel} />
     </svg>
   );
 }
@@ -2358,7 +2363,7 @@ function GyllyApp({ go }) {
 
               <p style={{ fontSize: 11.5, color: C.inkSoft, marginTop: 14, lineHeight: 1.5 }}>
                 Live marine &amp; weather from Open-Meteo, refreshed every 15 min, for Gyllyngvase
-                (50.14°N, 5.07°W). Shore-relation assumes the beach faces ~SSE. Model/forecast values
+                (50.14°N, 5.07°W). Shore-relation assumes the beach faces ~SE. Model/forecast values
                 to support a dynamic risk assessment — always confirm against conditions on the day.
               </p>
             </>
@@ -2400,7 +2405,7 @@ function GyllyApp({ go }) {
             </span>
           </div>
           <p style={{ fontSize: 11.5, color: C.inkSoft, marginTop: 10, lineHeight: 1.5 }}>
-            Schematic, North up · Gyllyngvase faces ~SSE. Arrows point the way the wind and swell
+            Schematic, North up · Gyllyngvase faces ~SE. Arrows point the way the wind and swell
             are travelling. Offshore wind (blowing off the beach, out to sea) is the danger for
             inflatables and weaker swimmers.
           </p>
