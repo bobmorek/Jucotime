@@ -1982,27 +1982,27 @@ function BeachPlan({ windFrom, windColor, swellFrom, swellLabel, windLabel }) {
 // ---- beach profile (cross-section): a small gradient at ~5 m, a 5° slope down
 // to 1 m, then a shallow 1° slope below. Heights are m above chart datum. ----
 const BEACH_PROFILE = (() => {
-  const bermH = 5, faceBottomH = 1, bermRun = 12, XMAX = 150;
-  const tan5 = Math.tan(5 * Math.PI / 180), tan1 = Math.tan(1 * Math.PI / 180);
+  const bermH = 5, faceBottomH = 1, bermRun = 12, XMAX = 200;
+  const tanFace = Math.tan(3 * Math.PI / 180), tanFlat = Math.tan(0.5 * Math.PI / 180);
   const p0 = { x: 0, h: bermH };
   const p1 = { x: bermRun, h: bermH };
-  const p2 = { x: bermRun + (bermH - faceBottomH) / tan5, h: faceBottomH };
-  const pEnd = { x: XMAX, h: faceBottomH - (XMAX - p2.x) * tan1 };
-  return { pts: [p0, p1, p2, pEnd], XMAX, bermH, faceBottomH, bermRun, tan5, tan1, p2 };
+  const p2 = { x: bermRun + (bermH - faceBottomH) / tanFace, h: faceBottomH };
+  const pEnd = { x: XMAX, h: faceBottomH - (XMAX - p2.x) * tanFlat };
+  return { pts: [p0, p1, p2, pEnd], XMAX, bermH, faceBottomH, bermRun, tanFace, tanFlat, p2 };
 })();
 // Horizontal distance from the back of the beach to where a given tide height
 // meets the profile (the water's edge).
 function beachEdgeX(h) {
-  const { bermH, faceBottomH, bermRun, tan5, tan1, p2 } = BEACH_PROFILE;
+  const { bermH, faceBottomH, bermRun, tanFace, tanFlat, p2 } = BEACH_PROFILE;
   if (h >= bermH) return 0;
-  if (h >= faceBottomH) return bermRun + (bermH - h) / tan5;
-  return p2.x + (faceBottomH - h) / tan1;
+  if (h >= faceBottomH) return bermRun + (bermH - h) / tanFace;
+  return p2.x + (faceBottomH - h) / tanFlat;
 }
 function BeachProfile({ waterLevel, hw, lw, predicted }) {
   const { pts, XMAX } = BEACH_PROFILE;
   const W = 760, H = 260, PL = 42, PR = 60, PT = 16, PB = 32;
   const plotW = W - PL - PR, plotH = H - PT - PB;
-  const YMIN = -0.8, YMAX = 5.8;
+  const YMIN = -0.4, YMAX = 5.8;
   const xPix = (x) => PL + (x / XMAX) * plotW;
   const yPix = (h) => PT + plotH - ((h - YMIN) / (YMAX - YMIN)) * plotH;
 
@@ -2019,9 +2019,6 @@ function BeachProfile({ waterLevel, hw, lw, predicted }) {
     waterPath = "M" + wp.map(([x, h]) => `${xPix(x).toFixed(1)},${yPix(h).toFixed(1)}`).join(" L") + " Z";
   }
 
-  const faceMid = { x: (BEACH_PROFILE.pts[1].x + BEACH_PROFILE.p2.x) / 2, h: (5 + 1) / 2 };
-  const flatMid = { x: (BEACH_PROFILE.p2.x + XMAX) / 2, h: (1 + BEACH_PROFILE.pts[3].h) / 2 };
-
   return (
     <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", minWidth: 480, display: "block" }}>
       {/* height grid + labels */}
@@ -2033,7 +2030,7 @@ function BeachProfile({ waterLevel, hw, lw, predicted }) {
         </g>
       ))}
       {/* distance ticks */}
-      {[0, 50, 100, 150].map((d) => (
+      {[0, 50, 100, 150, 200].map((d) => (
         <text key={"dx" + d} {...textHalo} x={xPix(d)} y={H - 12} textAnchor="middle"
           fontSize={10} fill={C.inkSoft} fontFamily="'Spline Sans Mono', monospace">{d}</text>
       ))}
@@ -2077,11 +2074,7 @@ function BeachProfile({ waterLevel, hw, lw, predicted }) {
         </g>
       )}
 
-      {/* gradient annotations */}
-      <text {...textHalo} x={xPix(faceMid.x)} y={yPix(faceMid.h) - 6} textAnchor="middle"
-        fontSize={10} fontWeight={700} fill="#8a7a56" fontFamily="Archivo" transform={`rotate(20 ${xPix(faceMid.x)} ${yPix(faceMid.h)})`}>5° slope</text>
-      <text {...textHalo} x={xPix(flatMid.x)} y={yPix(flatMid.h) - 6} textAnchor="middle"
-        fontSize={10} fontWeight={700} fill="#8a7a56" fontFamily="Archivo">1° flats</text>
+      {/* upper-beach height note */}
       <text {...textHalo} x={xPix(6)} y={yPix(5) - 6} textAnchor="start"
         fontSize={10} fontWeight={700} fill="#8a7a56" fontFamily="Archivo">upper beach ≈5 m</text>
     </svg>
@@ -2496,8 +2489,8 @@ function GyllyApp({ go }) {
             />
           </div>
           <p style={{ fontSize: 11.5, color: C.inkSoft, marginTop: 10, lineHeight: 1.5 }}>
-            Schematic cross-section: a gentle upper beach at ≈5 m, a 5° slope down to 1 m, then a
-            shallow 1° low-tide terrace. The solid line is the tide level now; dashed lines are the
+            Schematic cross-section: a gentle upper beach at ≈5 m, a slope down to 1 m, then a
+            shallower low-tide terrace. The solid line is the tide level now; dashed lines are the
             selected day’s high and low water, so the gap between them is the beach that covers and
             uncovers. Heights are above chart datum — the real slope and levels vary; watch the water.
           </p>
@@ -2612,8 +2605,8 @@ function GyllyApp({ go }) {
           <span style={label}>About this page</span>
           <p style={{ fontSize: 13, color: C.inkSoft, margin: "8px 0 0", lineHeight: 1.55 }}>
             Same Falmouth tide predictions as Juco Time, shown for Gyllyngvase beach. The beach
-            profile is a schematic cross-section (upper beach ≈5 m, a 5° slope down to 1 m, then a
-            shallow 1° terrace) with the tide level marked on it. Heights are astronomical
+            profile is a schematic cross-section (upper beach ≈5 m, a slope down to 1 m, then a
+            shallower low-tide terrace) with the tide level marked on it. Heights are astronomical
             predictions — wind, low pressure or surge can shift the real level by 0.3 m or more,
             and the true beach shape varies. Always keep your own margin and watch the water.
           </p>
