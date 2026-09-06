@@ -1979,12 +1979,121 @@ function BeachPlan({ windFrom, windColor, swellFrom, swellLabel, windLabel }) {
   );
 }
 
+// ---- beach profile (cross-section): a small gradient at ~5 m, a 5° slope down
+// to 1 m, then a shallow 1° slope below. Heights are m above chart datum. ----
+const BEACH_PROFILE = (() => {
+  const bermH = 5, faceBottomH = 1, bermRun = 12, XMAX = 150;
+  const tan5 = Math.tan(5 * Math.PI / 180), tan1 = Math.tan(1 * Math.PI / 180);
+  const p0 = { x: 0, h: bermH };
+  const p1 = { x: bermRun, h: bermH };
+  const p2 = { x: bermRun + (bermH - faceBottomH) / tan5, h: faceBottomH };
+  const pEnd = { x: XMAX, h: faceBottomH - (XMAX - p2.x) * tan1 };
+  return { pts: [p0, p1, p2, pEnd], XMAX, bermH, faceBottomH, bermRun, tan5, tan1, p2 };
+})();
+// Horizontal distance from the back of the beach to where a given tide height
+// meets the profile (the water's edge).
+function beachEdgeX(h) {
+  const { bermH, faceBottomH, bermRun, tan5, tan1, p2 } = BEACH_PROFILE;
+  if (h >= bermH) return 0;
+  if (h >= faceBottomH) return bermRun + (bermH - h) / tan5;
+  return p2.x + (faceBottomH - h) / tan1;
+}
+function BeachProfile({ waterLevel, hw, lw, predicted }) {
+  const { pts, XMAX } = BEACH_PROFILE;
+  const W = 760, H = 260, PL = 42, PR = 60, PT = 16, PB = 32;
+  const plotW = W - PL - PR, plotH = H - PT - PB;
+  const YMIN = -0.8, YMAX = 5.8;
+  const xPix = (x) => PL + (x / XMAX) * plotW;
+  const yPix = (h) => PT + plotH - ((h - YMIN) / (YMAX - YMIN)) * plotH;
+
+  const profLine = pts.map((p, i) => `${i ? "L" : "M"}${xPix(p.x).toFixed(1)},${yPix(p.h).toFixed(1)}`).join(" ");
+  const sandPath = `${profLine} L${xPix(XMAX).toFixed(1)},${yPix(YMIN).toFixed(1)} L${xPix(0).toFixed(1)},${yPix(YMIN).toFixed(1)} Z`;
+
+  let waterPath = "", edge = null;
+  if (waterLevel != null) {
+    const wl = Math.min(waterLevel, YMAX);
+    const ex = beachEdgeX(wl);
+    edge = { x: ex, h: wl };
+    const bed = pts.filter((p) => p.x >= ex);
+    const wp = [[ex, wl], ...bed.map((p) => [p.x, p.h]), [XMAX, wl]];
+    waterPath = "M" + wp.map(([x, h]) => `${xPix(x).toFixed(1)},${yPix(h).toFixed(1)}`).join(" L") + " Z";
+  }
+
+  const faceMid = { x: (BEACH_PROFILE.pts[1].x + BEACH_PROFILE.p2.x) / 2, h: (5 + 1) / 2 };
+  const flatMid = { x: (BEACH_PROFILE.p2.x + XMAX) / 2, h: (1 + BEACH_PROFILE.pts[3].h) / 2 };
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", minWidth: 480, display: "block" }}>
+      {/* height grid + labels */}
+      {[0, 1, 2, 3, 4, 5].map((h) => (
+        <g key={"gh" + h}>
+          <line x1={PL} x2={W - PR} y1={yPix(h)} y2={yPix(h)} stroke={C.lineSoft} strokeWidth={1} />
+          <text {...textHalo} x={PL - 6} y={yPix(h) + 3} textAnchor="end"
+            fontSize={10} fill={C.inkSoft} fontFamily="'Spline Sans Mono', monospace">{h}</text>
+        </g>
+      ))}
+      {/* distance ticks */}
+      {[0, 50, 100, 150].map((d) => (
+        <text key={"dx" + d} {...textHalo} x={xPix(d)} y={H - 12} textAnchor="middle"
+          fontSize={10} fill={C.inkSoft} fontFamily="'Spline Sans Mono', monospace">{d}</text>
+      ))}
+      <text {...textHalo} x={PL + plotW / 2} y={H - 1} textAnchor="middle" fontSize={9.5}
+        fill={C.inkSoft} fontFamily="Archivo">distance from back of beach (m)</text>
+      <text {...textHalo} transform={`rotate(-90 12 ${PT + plotH / 2})`} x={12} y={PT + plotH / 2}
+        textAnchor="middle" fontSize={9.5} fill={C.inkSoft} fontFamily="Archivo">height (m CD)</text>
+
+      {/* sand */}
+      <path d={sandPath} fill="#e7d9b5" />
+      {/* water */}
+      {waterPath && <path d={waterPath} fill="rgba(47,111,143,0.28)" />}
+      {/* beach profile line */}
+      <path d={profLine} fill="none" stroke="#a58a58" strokeWidth={2.6} strokeLinejoin="round" />
+
+      {/* HW / LW range for the selected day */}
+      {lw != null && (
+        <g>
+          <line x1={PL} x2={W - PR} y1={yPix(lw)} y2={yPix(lw)} stroke={C.wait} strokeWidth={1.5} strokeDasharray="5 3" />
+          <text {...textHalo} x={PL + 4} y={yPix(lw) - 4} fontSize={10} fontWeight={700} fill={C.wait} fontFamily="Archivo">LW {lw.toFixed(1)} m</text>
+        </g>
+      )}
+      {hw != null && (
+        <g>
+          <line x1={PL} x2={W - PR} y1={yPix(hw)} y2={yPix(hw)} stroke={C.sea} strokeWidth={1.5} strokeDasharray="5 3" />
+          <text {...textHalo} x={PL + 4} y={yPix(hw) - 4} fontSize={10} fontWeight={700} fill={C.sea} fontFamily="Archivo">HW {hw.toFixed(1)} m</text>
+        </g>
+      )}
+
+      {/* current water surface + edge */}
+      {waterLevel != null && (
+        <g>
+          <line x1={xPix(edge.x)} x2={W - PR} y1={yPix(edge.h)} y2={yPix(edge.h)} stroke={C.seaDeep} strokeWidth={2.4} />
+          <circle cx={xPix(edge.x)} cy={yPix(edge.h)} r={4.5} fill={C.seaDeep} stroke="#fff" strokeWidth={1.6} />
+          <text {...textHalo} x={W - PR + 4} y={yPix(edge.h) + 3} textAnchor="start"
+            fontSize={11} fontWeight={700} fill={C.seaDeep} fontFamily="Archivo">
+            {waterLevel.toFixed(2)} m{predicted ? "≈" : ""}
+          </text>
+          <text {...textHalo} x={xPix(edge.x)} y={yPix(edge.h) - 9} textAnchor="middle"
+            fontSize={9.5} fontWeight={700} fill={C.seaDeep} fontFamily="Archivo">water’s edge</text>
+        </g>
+      )}
+
+      {/* gradient annotations */}
+      <text {...textHalo} x={xPix(faceMid.x)} y={yPix(faceMid.h) - 6} textAnchor="middle"
+        fontSize={10} fontWeight={700} fill="#8a7a56" fontFamily="Archivo" transform={`rotate(20 ${xPix(faceMid.x)} ${yPix(faceMid.h)})`}>5° slope</text>
+      <text {...textHalo} x={xPix(flatMid.x)} y={yPix(flatMid.h) - 6} textAnchor="middle"
+        fontSize={10} fontWeight={700} fill="#8a7a56" fontFamily="Archivo">1° flats</text>
+      <text {...textHalo} x={xPix(6)} y={yPix(5) - 6} textAnchor="start"
+        fontSize={10} fontWeight={700} fill="#8a7a56" fontFamily="Archivo">upper beach ≈5 m</text>
+    </svg>
+  );
+}
+
 /* =====================================================================
    GYLLY TIDES — beach view for Gyllyngvase.
-   Same tide engine (RAW table + harmonic model) as Juco Time, reframed
-   around the low-tide rock shelf: how much water is over the shelf right
-   now and through the day. For surfers and surf lifesaving. The shelf
-   level is adjustable (and needs local calibration).
+   Same tide engine (RAW table + harmonic model) as Juco Time, presented for
+   the beach: live conditions, a wind/swell plan view, and a beach-profile
+   cross-section with the tide level marked on it. For surfers and surf
+   lifesaving.
    ===================================================================== */
 function GyllyApp({ go }) {
   const [now, setNow] = useState(() => new Date());
@@ -1992,9 +2101,6 @@ function GyllyApp({ go }) {
     const t = todayISO();
     return dayAvailable(t) ? t : "2026-05-14";
   });
-  // Low-tide shelf level, metres above chart datum. Placeholder default —
-  // calibrate against the real Gyllyngvase shelf, then set as the default.
-  const [shelf, setShelf] = useState(1.0);
   // Live surf/marine + weather conditions (Open-Meteo, fetched client-side).
   const [cond, setCond] = useState(null);
 
@@ -2090,26 +2196,14 @@ function GyllyApp({ go }) {
       const t = e.date.getTime();
       return t >= start && t < end;
     });
-    // exposed windows: contiguous runs where the tide is below the shelf
-    const exposed = [];
-    let runStart = null;
-    samples.forEach((s, i) => {
-      const off = s.h !== null && s.h < shelf;
-      if (off && runStart === null) runStart = s.m;
-      if ((!off || i === samples.length - 1) && runStart !== null) {
-        const endM = off ? s.m : samples[i - 1].m;
-        exposed.push({ from: runStart, to: endM });
-        runStart = null;
-      }
-    });
     const valid = samples.filter((s) => s.h !== null);
     const hs = valid.map((s) => s.h);
     return {
-      start, end, samples, events, exposed,
+      start, end, samples, events,
       maxH: hs.length ? Math.max(...hs) : 5,
       minH: hs.length ? Math.min(...hs) : 0,
     };
-  }, [selISO, shelf]);
+  }, [selISO]);
 
   const range = day.maxH - day.minH;
 
@@ -2132,22 +2226,8 @@ function GyllyApp({ go }) {
   const nowM = isToday ? (now.getTime() - day.start) / 60000 : null;
   const showNowMark = nowM !== null && nowM >= 0 && nowM <= 1440;
 
-  // ---------- live shelf status ----------
-  const CAUTION = 0.3; // m of water over the shelf below which it's a hazard
-  const clearance = inRange ? live.h - shelf : null;
-  const status =
-    clearance === null ? null
-      : clearance <= 0 ? "exposed"
-        : clearance <= CAUTION ? "caution" : "covered";
-  const statusMeta = {
-    covered: { word: "COVERED", color: C.go, bg: "rgba(47,125,82,0.10)" },
-    caution: { word: "SHALLOW", color: C.wait, bg: "rgba(176,125,34,0.12)" },
-    exposed: { word: "SHELF DRY", color: C.danger, bg: "rgba(169,63,48,0.10)" },
-  };
-  const sm = status ? statusMeta[status] : null;
-  const lowClear = nextLow ? nextLow.h - shelf : null;
-
-  const SHELF_PRESETS = [0.5, 0.8, 1.0, 1.3];
+  const springLabel =
+    range >= 4 ? "Big spring tide" : range <= 2.6 ? "Small neap tide" : "Mid-range tide";
 
   // ---------- live conditions (derived tones/labels) ----------
   const surf = cond && cond.surf;
@@ -2199,7 +2279,7 @@ function GyllyApp({ go }) {
             fontFamily: "'Fraunces', serif", fontStyle: "italic", fontWeight: 500,
             fontSize: 17, color: C.red, margin: "2px 0 0", letterSpacing: "0.005em",
           }}>
-            water over the low-tide shelf · for surfers &amp; surf lifesaving
+            tide on the beach · for surfers &amp; surf lifesaving
           </p>
         </header>
 
@@ -2252,48 +2332,38 @@ function GyllyApp({ go }) {
                 </div>
               </div>
 
-              {/* water over shelf */}
+              {/* next tides */}
               <div style={{ flex: "1 1 220px", padding: "20px 18px", borderRight: `1px solid ${C.lineSoft}` }}>
-                <div style={label}>Water over shelf</div>
-                <div style={{ display: "flex", alignItems: "flex-end", gap: 8, marginTop: 4 }}>
-                  <span style={{
-                    fontFamily: "'Fraunces', serif", fontWeight: 600,
-                    fontSize: 44, lineHeight: 0.95, color: sm.color,
-                  }}>{clearance > 0 ? clearance.toFixed(2) : "0"}</span>
-                  <span style={{ fontSize: 18, color: C.inkSoft, paddingBottom: 6 }}>m</span>
-                </div>
-                <div style={{ fontSize: 13, color: C.inkSoft, marginTop: 6 }}>
-                  shelf set at {shelf.toFixed(1)} m
-                </div>
+                <div style={label}>Next tides</div>
+                {nextHigh && (
+                  <div style={{ marginTop: 8 }}>
+                    <span style={{ fontWeight: 700, color: C.sea }}>High</span>{" "}
+                    <span style={{ fontFamily: "'Spline Sans Mono', monospace" }}>{fmtTime(nextHigh.date)}</span>{" "}
+                    <span style={{ color: C.inkSoft }}>· {nextHigh.h.toFixed(2)} m</span>
+                    <div style={{ fontSize: 12, color: C.inkSoft }}>in {durStr(nextHigh.date - now)}</div>
+                  </div>
+                )}
                 {nextLow && (
-                  <div style={{ fontSize: 12, color: C.inkSoft, marginTop: 8 }}>
-                    Lowest at <span style={{ fontFamily: "'Spline Sans Mono', monospace" }}>{fmtTime(nextLow.date)}</span>
-                    {" "}·{" "}
-                    <strong style={{ color: lowClear <= CAUTION ? C.danger : C.inkSoft }}>
-                      {lowClear > 0 ? `${lowClear.toFixed(2)} m over` : `${Math.abs(lowClear).toFixed(2)} m below`}
-                    </strong>
+                  <div style={{ marginTop: 10 }}>
+                    <span style={{ fontWeight: 700, color: C.wait }}>Low</span>{" "}
+                    <span style={{ fontFamily: "'Spline Sans Mono', monospace" }}>{fmtTime(nextLow.date)}</span>{" "}
+                    <span style={{ color: C.inkSoft }}>· {nextLow.h.toFixed(2)} m</span>
+                    <div style={{ fontSize: 12, color: C.inkSoft }}>in {durStr(nextLow.date - now)}</div>
                   </div>
                 )}
               </div>
 
-              {/* shelf status */}
-              <div style={{
-                flex: "1 1 200px", padding: "20px 18px",
-                background: sm.bg,
-              }}>
-                <div style={label}>Shelf status</div>
+              {/* today's range */}
+              <div style={{ flex: "1 1 200px", padding: "20px 18px" }}>
+                <div style={label}>Today</div>
                 <div style={{
                   marginTop: 6, fontFamily: "'Fraunces', serif", fontWeight: 600,
-                  fontSize: 26, color: sm.color,
+                  fontSize: 22, color: C.seaDeep,
                 }}>
-                  {sm.word}
+                  {springLabel}
                 </div>
-                <div style={{ fontSize: 13, color: C.inkSoft, marginTop: 2 }}>
-                  {status === "covered"
-                    ? `${clearance.toFixed(2)} m of water over the shelf`
-                    : status === "caution"
-                      ? `Only ${clearance.toFixed(2)} m over — shelf near the surface`
-                      : `Tide is at/under the shelf — rocks exposed`}
+                <div style={{ fontSize: 13, color: C.inkSoft, marginTop: 4 }}>
+                  Range {range.toFixed(1)} m · {day.minH.toFixed(1)}–{day.maxH.toFixed(1)} m
                 </div>
               </div>
             </div>
@@ -2411,44 +2481,26 @@ function GyllyApp({ go }) {
           </p>
         </section>
 
-        {/* ---------- SHELF LEVEL SETTINGS ---------- */}
+        {/* ---------- BEACH PROFILE ---------- */}
         <section style={{ ...card, marginBottom: 16 }}>
-          <span style={label}>Low-tide shelf level</span>
-          <p style={{ fontSize: 13, color: C.inkSoft, margin: "6px 0 12px" }}>
-            Tide height (above chart datum) at which the shelf starts to dry out. This is a
-            placeholder — <strong>calibrate it against the real Gyllyngvase shelf</strong> and it
-            will drive the status and the shaded hazard band below.
-          </p>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
-            {SHELF_PRESETS.map((v) => {
-              const on = Math.abs(shelf - v) < 0.001;
-              return (
-                <button key={v}
-                  onClick={() => setShelf(v)}
-                  style={{
-                    cursor: "pointer", fontFamily: "Archivo, sans-serif",
-                    fontSize: 13, fontWeight: 600,
-                    padding: "8px 12px", borderRadius: 9,
-                    border: `1px solid ${on ? C.seaDeep : C.line}`,
-                    background: on ? C.seaDeep : C.panel2,
-                    color: on ? "#f8f2e3" : C.ink,
-                  }}>
-                  {v.toFixed(1)} m
-                </button>
-              );
-            })}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 6 }}>
+            <span style={label}>Beach profile</span>
+            <span style={{ fontSize: 12, color: C.inkSoft }}>water level now</span>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
-            <input
-              type="range" min={0} max={3} step={0.1} value={shelf}
-              onChange={(e) => setShelf(Number(e.target.value))}
-              style={{ flex: "1 1 240px", accentColor: C.seaDeep }}
+          <div style={{ width: "100%", overflowX: "auto", marginTop: 12 }}>
+            <BeachProfile
+              waterLevel={inRange ? live.h : null}
+              hw={day.maxH}
+              lw={day.minH}
+              predicted={inRange ? live.predicted : false}
             />
-            <span style={{
-              fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 22, color: C.seaDeep,
-              minWidth: 70, textAlign: "right",
-            }}>{shelf.toFixed(1)} m</span>
           </div>
+          <p style={{ fontSize: 11.5, color: C.inkSoft, marginTop: 10, lineHeight: 1.5 }}>
+            Schematic cross-section: a gentle upper beach at ≈5 m, a 5° slope down to 1 m, then a
+            shallow 1° low-tide terrace. The solid line is the tide level now; dashed lines are the
+            selected day’s high and low water, so the gap between them is the beach that covers and
+            uncovers. Heights are above chart datum — the real slope and levels vary; watch the water.
+          </p>
         </section>
 
         {/* ---------- DAY PLANNER ---------- */}
@@ -2484,14 +2536,8 @@ function GyllyApp({ go }) {
             fontSize: 11, color: C.inkSoft, marginBottom: 8,
           }}>
             <LegendItem color={C.seaDeep} label="tide prediction" />
-            <LegendItem color={C.wait} label="shelf level" />
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-              <span style={{
-                width: 14, height: 10, background: "rgba(169,63,48,0.18)",
-                border: "1px solid rgba(169,63,48,0.35)", borderRadius: 2,
-              }} />
-              <span>shelf drying / shallow</span>
-            </span>
+            <LegendItem color={C.sea} label="high water" />
+            <LegendItem color={C.wait} label="low water" />
           </div>
 
           {/* chart */}
@@ -2517,22 +2563,9 @@ function GyllyApp({ go }) {
                   </text>
                 </g>
               ))}
-              {/* shade shelf-drying zone (below shelf level) */}
-              <rect
-                x={PL} y={yOf(shelf)} width={plotW}
-                height={PT + plotH - yOf(shelf)}
-                fill="rgba(169,63,48,0.10)"
-              />
               {/* tide curve */}
               {areaPath && <path d={areaPath} fill={C.seaFill} />}
               {linePath && <path d={linePath} fill="none" stroke={C.seaDeep} strokeWidth={2.4} />}
-              {/* shelf level line */}
-              <line x1={PL} x2={W - PR} y1={yOf(shelf)} y2={yOf(shelf)}
-                stroke={C.wait} strokeWidth={2.4} />
-              <text {...textHalo} x={W - PR - 4} y={yOf(shelf) - 5} textAnchor="end"
-                fontSize={11} fill={C.wait} fontWeight={700} fontFamily="Archivo">
-                shelf · {shelf.toFixed(1)} m
-              </text>
               {/* HW / LW markers */}
               {day.events.map((e, i) => {
                 const m = (e.date.getTime() - day.start) / 60000;
@@ -2568,42 +2601,9 @@ function GyllyApp({ go }) {
           {/* day summary chips */}
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 6, marginBottom: 12 }}>
             <Chip k="Range" v={`${range.toFixed(1)} m`} />
+            <Chip k="Tide type" v={springLabel} />
             <Chip k="High water" v={`${day.maxH.toFixed(1)} m`} />
             <Chip k="Low water" v={`${day.minH.toFixed(1)} m`} />
-            <Chip k="Shelf clears LW by" v={`${(day.minH - shelf).toFixed(1)} m`} />
-          </div>
-
-          {/* shelf-exposed windows */}
-          <div>
-            <span style={label}>Shelf drying (tide &lt; {shelf.toFixed(1)} m)</span>
-            {day.exposed.length === 0 ? (
-              <p style={{ fontSize: 14, color: C.go, margin: "8px 0 0", fontWeight: 600 }}>
-                Shelf stays covered all day — tide never drops below {shelf.toFixed(1)} m.
-              </p>
-            ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
-                {day.exposed.map((w, i) => {
-                  const from = new Date(day.start + w.from * 60000);
-                  const to = new Date(day.start + w.to * 60000);
-                  return (
-                    <div key={i} style={{
-                      display: "flex", justifyContent: "space-between", alignItems: "center",
-                      background: "rgba(169,63,48,0.09)", border: `1px solid rgba(169,63,48,0.30)`,
-                      borderRadius: 9, padding: "9px 12px",
-                    }}>
-                      <span style={{
-                        fontFamily: "'Spline Sans Mono', monospace", fontWeight: 600, fontSize: 15, color: C.danger,
-                      }}>
-                        {fmtTime(from)} – {fmtTime(to)}
-                      </span>
-                      <span style={{ fontSize: 12, color: C.inkSoft }}>
-                        {durStr(to - from)} shallow
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
           </div>
         </section>
 
@@ -2611,12 +2611,11 @@ function GyllyApp({ go }) {
         <section style={{ ...card, marginBottom: 16 }}>
           <span style={label}>About this page</span>
           <p style={{ fontSize: 13, color: C.inkSoft, margin: "8px 0 0", lineHeight: 1.55 }}>
-            Same Falmouth tide predictions as Juco Time, shown against the Gyllyngvase low-tide
-            shelf. "Water over shelf" is the predicted tide height minus your shelf level; the red
-            band is where the shelf dries out or barely covers. Heights are astronomical
-            predictions — wind, low pressure or surge can shift the real level by 0.3 m or more.
-            Always keep your own margin and watch the water. The shelf level here is a placeholder
-            pending local calibration.
+            Same Falmouth tide predictions as Juco Time, shown for Gyllyngvase beach. The beach
+            profile is a schematic cross-section (upper beach ≈5 m, a 5° slope down to 1 m, then a
+            shallow 1° terrace) with the tide level marked on it. Heights are astronomical
+            predictions — wind, low pressure or surge can shift the real level by 0.3 m or more,
+            and the true beach shape varies. Always keep your own margin and watch the water.
           </p>
         </section>
 
