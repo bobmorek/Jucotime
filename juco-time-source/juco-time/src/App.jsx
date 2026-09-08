@@ -637,6 +637,8 @@ const SLIPS = [
   { name: "Grove Place slip", min: 1.3 },
   { name: "Church St car park", min: 2.0 },
   { name: "Flushing Quay", min: 1.5 },
+  // Pandora dock — tide height at the reference moment Sun 6 Sep 2026, 18:45 BST.
+  { name: "Pandora dock", min: 1.8 },
 ];
 
 // Falmouth tidal datums (approx, m above Chart Datum)
