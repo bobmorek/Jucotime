@@ -612,6 +612,10 @@ function dayIsGreen(now) {
 function dayCircleColor(now) {
   return dayIsGreen(now) ? "#2f7d52" : "#e07b1f"; // green : orange
 }
+// Day colour for an arbitrary date/ISO day key (same rule as the corner dot).
+function dayColorForISO(iso) {
+  return dayCircleColor(isoToDate(iso, "12:00"));
+}
 // Soft page-background tint matching the day's colour (green/orange wash).
 function dayBgColor(now) {
   return dayIsGreen(now) ? "#dfe8dc" : "#f1e3ce"; // soft sage : soft peach
@@ -1352,6 +1356,8 @@ function JucoApp({ go }) {
             {gaugeLinePath && <LegendItem color="#c47150" label={`${gaugeStation} observed`} dashed />}
             {(apTrackPath || (showNowMark && apObserved != null)) && <LegendItem color="#6d4ca8" label="AP observed" dashed />}
             <LegendItem color={C.go} label="launch limit" />
+            <LegendItem color={dayColorForISO(selISO)}
+              label={`day status · ${dayIsGreen(isoToDate(selISO, "12:00")) ? "green" : "orange"}`} />
             <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
               <span style={{
                 width: 14, height: 10, background: "rgba(169,63,48,0.18)",
@@ -1399,6 +1405,15 @@ function JucoApp({ go }) {
                   strokeWidth={1.9} strokeDasharray="5 3"
                   strokeLinecap="round" strokeLinejoin="round" />
               )}
+              {/* daily status line — same orange/green as the corner dot, for the
+                  day currently shown in the planner. */}
+              <line x1={PL} x2={W - PR} y1={PT + 7} y2={PT + 7}
+                stroke={dayColorForISO(selISO)} strokeWidth={3} strokeLinecap="round" />
+              <text {...textHalo} x={PL + 4} y={PT + 21} textAnchor="start"
+                fontSize={10} fontWeight={700} fontFamily="Archivo"
+                fill={dayColorForISO(selISO)} letterSpacing="0.08em">
+                {dayIsGreen(isoToDate(selISO, "12:00")) ? "GREEN DAY" : "ORANGE DAY"}
+              </text>
               {/* threshold line — drawn on top of curve so it stays visible */}
               <line x1={PL} x2={W - PR} y1={yOf(threshold)} y2={yOf(threshold)}
                 stroke={C.go} strokeWidth={2.4} />
